@@ -14,6 +14,16 @@ public struct ScreenSize: Equatable, Sendable {
     }
 }
 
+/// The server wants credentials before the Session can connect.
+public struct CredentialRequest: Equatable, Sendable {
+    /// False when the server only asks for a password (classic VNC authentication).
+    public let needsUsername: Bool
+
+    public init(needsUsername: Bool) {
+        self.needsUsername = needsUsername
+    }
+}
+
 /// One live link to a remote computer.
 @MainActor @Observable
 public final class Session {
@@ -29,9 +39,12 @@ public final class Session {
     public private(set) var screenSize: ScreenSize?
     /// The latest picture of the remote screen.
     public private(set) var image: CGImage?
+    /// Set while the server waits for `submitCredentials` or `cancelCredentials`.
+    public private(set) var credentialRequest: CredentialRequest?
 
     @ObservationIgnored private var link: VNCConnection?
     @ObservationIgnored private var linkDelegate: LinkDelegate?
+    @ObservationIgnored private var credentialReply: CredentialReply?
 
     public init(address: String, port: UInt16) {
         self.address = address
@@ -62,7 +75,27 @@ public final class Session {
     }
 
     public func disconnect() {
+        cancelCredentials()
         link?.disconnect()
+    }
+
+    public func submitCredentials(username: String, password: String) {
+        guard let credentialRequest else { return }
+        answerCredentialRequest(credentialRequest.needsUsername
+            ? VNCUsernamePasswordCredential(username: username, password: password)
+            : VNCPasswordCredential(password: password))
+    }
+
+    /// Declines to log in; the server then ends the Session.
+    public func cancelCredentials() {
+        answerCredentialRequest(nil)
+    }
+
+    private func answerCredentialRequest(_ credential: VNCCredential?) {
+        let reply = credentialReply
+        credentialReply = nil
+        credentialRequest = nil
+        reply?.send(credential)
     }
 
     public func handle(_ event: InputEvent) {
@@ -101,9 +134,17 @@ public final class Session {
         switch status {
         case .connecting: state = .connecting
         case .connected: state = .connected
-        case .disconnected: state = .disconnected(error: error)
+        case .disconnected:
+            credentialReply = nil
+            credentialRequest = nil
+            state = .disconnected(error: error)
         case .disconnecting: break
         }
+    }
+
+    fileprivate func credentialsRequested(_ request: CredentialRequest, reply: CredentialReply) {
+        credentialRequest = request
+        credentialReply = reply
     }
 
     fileprivate func framebufferChanged() {
@@ -131,7 +172,12 @@ private final class LinkDelegate: NSObject, VNCConnectionDelegate, Sendable {
     func connection(_ connection: VNCConnection,
                     credentialFor authenticationType: VNCAuthenticationType,
                     completion: @escaping (VNCCredential?) -> Void) {
-        completion(nil)
+        let request = CredentialRequest(needsUsername: authenticationType.requiresUsername)
+        let reply = CredentialReply(send: completion)
+        Task { @MainActor [weak session] in
+            guard let session else { return reply.send(nil) }
+            session.credentialsRequested(request, reply: reply)
+        }
     }
 
     func connection(_ connection: VNCConnection, didCreateFramebuffer framebuffer: VNCFramebuffer) {
@@ -163,4 +209,9 @@ private final class LinkDelegate: NSObject, VNCConnectionDelegate, Sendable {
             session?.framebufferChanged()
         }
     }
+}
+
+/// RoyalVNCKit's credential completion, carried to the main actor and called exactly once from there.
+private struct CredentialReply: @unchecked Sendable {
+    let send: (VNCCredential?) -> Void
 }

@@ -1,7 +1,7 @@
 import Foundation
 import Synchronization
 
-/// A minimal RFB 3.8 server on localhost for tests: security type None, records every client
+/// A minimal RFB 3.8 server on localhost for tests: security type None or VNC password, records every client
 /// message, and sends server messages or drops the connection on demand.
 /// It serves one client at a time and accepts the next one once the current client is gone.
 /// Call `stop()` when done: the accept thread keeps the server alive until then.
@@ -17,7 +17,14 @@ public final class FakeRFBServer: Sendable {
         case unknown(type: UInt8)
     }
 
+    public enum Security: Sendable {
+        case none
+        /// VNC authentication with an all-zero challenge. Any response is accepted and recorded.
+        case vncPassword
+    }
+
     public let port: UInt16
+    public let security: Security
     public let width: UInt16
     public let height: UInt16
     /// Encodings the server claims to support. When the client's SetEncodings lists one of them,
@@ -28,8 +35,11 @@ public final class FakeRFBServer: Sendable {
     private let listener: Int32
     private let client = Mutex<Int32?>(nil)
     private let recorded = Mutex<[ClientMessage]>([])
+    private let response = Mutex<[UInt8]?>(nil)
 
-    public init(width: UInt16 = 64, height: UInt16 = 48, advertisedEncodings: [Int32] = []) throws {
+    public init(width: UInt16 = 64, height: UInt16 = 48, security: Security = .none,
+                advertisedEncodings: [Int32] = []) throws {
+        self.security = security
         self.width = width
         self.height = height
         self.advertisedEncodings = advertisedEncodings
@@ -59,6 +69,11 @@ public final class FakeRFBServer: Sendable {
     /// Every message the client has sent since the handshake, in order.
     public var messages: [ClientMessage] {
         recorded.withLock { $0 }
+    }
+
+    /// The client's 16-byte answer to the VNC authentication challenge.
+    public var authenticationResponse: [UInt8]? {
+        response.withLock { $0 }
     }
 
     /// Sends raw bytes (a server-to-client message) to the connected client.
@@ -97,11 +112,16 @@ public final class FakeRFBServer: Sendable {
     }
 
     private func serve(_ fd: Int32) {
-        // Handshake: version, security type None, SecurityResult OK, ClientInit, ServerInit.
+        // Handshake: version, security type, SecurityResult OK, ClientInit, ServerInit.
         writeAll(fd, Array("RFB 003.008\n".utf8))
         guard readExactly(fd, 12) != nil else { return }
-        writeAll(fd, [1, 1])
+        writeAll(fd, [1, security == .none ? 1 : 2])
         guard readExactly(fd, 1) != nil else { return }
+        if security == .vncPassword {
+            writeAll(fd, [UInt8](repeating: 0, count: 16))
+            guard let answer = readExactly(fd, 16) else { return }
+            response.withLock { $0 = answer }
+        }
         writeAll(fd, be32(0))
         guard readExactly(fd, 1) != nil else { return }
         let name = Array("fake".utf8)

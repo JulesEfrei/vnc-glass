@@ -15,6 +15,39 @@ struct SessionTests {
         try await eventually { session.screenSize == ScreenSize(width: 64, height: 48) }
     }
 
+    @Test func asksForThePasswordAndSendsItToTheServer() async throws {
+        let server = try FakeRFBServer(security: .vncPassword)
+        defer { server.stop() }
+        let session = Session(address: "127.0.0.1", port: server.port)
+
+        session.connect()
+        try await eventually { session.credentialRequest != nil }
+        #expect(session.credentialRequest == CredentialRequest(needsUsername: false))
+
+        session.submitCredentials(username: "", password: "password")
+
+        try await eventually { session.state == .connected }
+        #expect(session.credentialRequest == nil)
+        // DES of the server's all-zero challenge keyed by "password", computed with openssl.
+        let block: [UInt8] = [0xFF, 0x97, 0x50, 0x2E, 0x94, 0x22, 0xF0, 0x89]
+        #expect(server.authenticationResponse == block + block)
+    }
+
+    @Test func cancellingThePasswordPromptDisconnects() async throws {
+        let server = try FakeRFBServer(security: .vncPassword)
+        defer { server.stop() }
+        let session = Session(address: "127.0.0.1", port: server.port)
+
+        session.connect()
+        try await eventually { session.credentialRequest != nil }
+        session.cancelCredentials()
+
+        try await eventually {
+            if case .disconnected = session.state { true } else { false }
+        }
+        #expect(session.credentialRequest == nil)
+    }
+
     @Test func remoteScreenUpdatesProduceAPicture() async throws {
         let server = try FakeRFBServer(width: 2, height: 1)
         defer { server.stop() }
