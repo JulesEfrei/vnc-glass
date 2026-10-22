@@ -15,6 +15,14 @@ public struct ScreenSize: Equatable, Sendable {
     }
 }
 
+/// The remote pointer's shape, drawn locally so it moves without waiting for the server.
+public struct RemoteCursor: Equatable, Sendable {
+    /// Nil when the remote hides its pointer.
+    public let image: CGImage?
+    /// The point of the image that sits on the pointer's position, in remote pixels from the top left.
+    public let hotspot: CGPoint
+}
+
 /// The server wants credentials before the Session can connect.
 public struct CredentialRequest: Equatable, Sendable {
     /// False when the server only asks for a password (classic VNC authentication).
@@ -68,6 +76,8 @@ public final class Session {
     public private(set) var screenSize: ScreenSize?
     /// The latest picture of the remote screen.
     public private(set) var image: CGImage?
+    /// Nil until the server sends a cursor shape; until then it draws its pointer into `image`.
+    public private(set) var cursor: RemoteCursor?
     /// Set while the server waits for `submitCredentials` or `cancelCredentials`.
     public private(set) var credentialRequest: CredentialRequest?
     /// Set while the Session waits for the user to accept or refuse a changed server key.
@@ -110,6 +120,8 @@ public final class Session {
     /// the text itself and with LF line endings over Extended Clipboard, and with `?` for what Latin-1 lacks over plain
     /// cut text.
     @ObservationIgnored private var sentClipboardTexts: Set<String> = []
+    /// Scrolling not yet sent, less than one wheel click on each axis.
+    @ObservationIgnored private var scrollRemainder = (x: 0.0, y: 0.0)
 
     public init(address: String, port: UInt16, username: String = "", password: String? = nil,
                 keyboardProfile: KeyboardProfile = .default, displaySizing: DisplaySizing = .scaleToFit,
@@ -267,7 +279,25 @@ public final class Session {
             } else {
                 link.mouseButtonUp(button, x: x, y: y)
             }
+        case .scroll(let dx, let dy, let x, let y):
+            guard let (x, y) = remotePixel(x, y) else { return }
+            // Like a click: ⌃-scroll zooms on Linux, so held-back keys go first.
+            forwardShortcutKeys()
+            let clicksY = Self.wholeClicks(adding: dy, to: &scrollRemainder.y)
+            let clicksX = Self.wholeClicks(adding: dx, to: &scrollRemainder.x)
+            if clicksY != 0 { link.mouseWheel(clicksY > 0 ? .up : .down, x: x, y: y, steps: UInt32(abs(clicksY))) }
+            if clicksX != 0 { link.mouseWheel(clicksX > 0 ? .left : .right, x: x, y: y, steps: UInt32(abs(clicksX))) }
         }
+    }
+
+    /// Adds `delta` to one axis's leftover scrolling and takes out the whole clicks. Turning back drops the leftover, so
+    /// the first click the other way takes no longer than any other.
+    private static func wholeClicks(adding delta: Double, to remainder: inout Double) -> Double {
+        if remainder * delta < 0 { remainder = 0 }
+        remainder += delta
+        let clicks = remainder.rounded(.towardZero)
+        remainder -= clicks
+        return clicks
     }
 
     /// Holds back left ⌃ and left ⌥ pressed with nothing else down: released with no other key in between, they are
@@ -352,6 +382,8 @@ public final class Session {
             lockMode = .unlocked
             remoteClipboardText = nil
             sentClipboardTexts = []
+            cursor = nil
+            scrollRemainder = (0, 0)
             if failure == .authenticationFailed { savedPassword = nil }
             state = .disconnected(failure)
         case .disconnecting: break
@@ -391,6 +423,10 @@ public final class Session {
         guard !sentClipboardTexts.contains(text) else { return }
         sentClipboardTexts = []
         remoteClipboardText = text
+    }
+
+    fileprivate func cursorChanged(_ cursor: RemoteCursor) {
+        self.cursor = cursor
     }
 
     fileprivate func framebufferChanged() {
@@ -450,7 +486,10 @@ private final class LinkDelegate: NSObject, VNCConnectionDelegate, Sendable {
         framebufferChanged()
     }
 
-    func connection(_ connection: VNCConnection, didUpdateCursor cursor: VNCCursor) {}
+    func connection(_ connection: VNCConnection, didUpdateCursor cursor: VNCCursor) {
+        let cursor = RemoteCursor(image: cursor.cgImage, hotspot: cursor.cgHotspot)
+        Task { @MainActor [weak session] in session?.cursorChanged(cursor) }
+    }
 
     func connection(_ connection: VNCConnection, didReceiveClipboardText text: String) {
         Task { @MainActor [weak session] in session?.remoteClipboardChanged(text) }

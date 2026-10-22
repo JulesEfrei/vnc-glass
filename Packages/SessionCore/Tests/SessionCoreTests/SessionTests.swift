@@ -606,6 +606,78 @@ struct SessionTests {
         #expect(pointerEvents(server) == [.pointerEvent(buttonMask: 0, x: 0, y: 47)])
     }
 
+    @Test func smallScrollDeltasAddUpToOneWheelClick() async throws {
+        let server = try FakeRFBServer(width: 64, height: 48)
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+
+        session.handle(.scroll(dx: 0, dy: 0.4, x: 10, y: 20))
+        session.handle(.scroll(dx: 0, dy: 0.4, x: 10, y: 20))
+        // Sent after any click the deltas so far would have made, so a lone move here means none was.
+        session.handle(.pointerMoved(x: 10, y: 20))
+        session.handle(.scroll(dx: 0, dy: 0.4, x: 10, y: 20))
+
+        try await eventually { pointerEvents(server).count == 3 }
+        // RFB button mask: bit 3 is button 4, wheel up; a click is a press and a release.
+        #expect(pointerEvents(server) == [
+            .pointerEvent(buttonMask: 0, x: 10, y: 20),
+            .pointerEvent(buttonMask: 8, x: 10, y: 20),
+            .pointerEvent(buttonMask: 0, x: 10, y: 20),
+        ])
+    }
+
+    @Test func scrollingDownIsButton5AndSidewaysIsButtons6And7() async throws {
+        let server = try FakeRFBServer(width: 64, height: 48)
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+
+        session.handle(.scroll(dx: 0, dy: -2, x: 1, y: 2))
+        session.handle(.scroll(dx: 1, dy: 0, x: 1, y: 2))
+        session.handle(.scroll(dx: -1.5, dy: 0, x: 1, y: 2))
+
+        try await eventually { pointerEvents(server).count == 8 }
+        // Bits 4, 5 and 6: button 5 down, button 6 left, button 7 right. The -1.5 leaves a half step for later.
+        #expect(pointerEvents(server) == [16, 0, 16, 0, 32, 0, 64, 0].map { .pointerEvent(buttonMask: $0, x: 1, y: 2) })
+    }
+
+    @Test func reversingTheScrollDropsWhatWasLeftOverTheOtherWay() async throws {
+        let server = try FakeRFBServer(width: 64, height: 48)
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+
+        session.handle(.scroll(dx: 0, dy: 0.9, x: 1, y: 2))
+        session.handle(.scroll(dx: 0, dy: -1, x: 1, y: 2))
+
+        try await eventually { pointerEvents(server).count == 2 }
+        #expect(pointerEvents(server) == [16, 0].map { .pointerEvent(buttonMask: $0, x: 1, y: 2) })
+    }
+
+    @Test func theRemoteCursorShapeIsShownAsALocalCursor() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+        #expect(session.cursor == nil)
+
+        // 2x2 with its hotspot at 1,0; the mask leaves only the bottom-left pixel transparent.
+        server.send(cursorUpdate(width: 2, height: 2, hotspotX: 1, hotspotY: 0, mask: [0b1100_0000, 0b0100_0000]))
+
+        try await eventually { session.cursor != nil }
+        #expect(session.cursor?.image?.width == 2)
+        #expect(session.cursor?.image?.height == 2)
+        #expect(session.cursor?.hotspot == CGPoint(x: 1, y: 0))
+    }
+
+    @Test func aFullyTransparentRemoteCursorHidesThePointer() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+
+        server.send(cursorUpdate(width: 2, height: 2, hotspotX: 0, hotspotY: 0, mask: [0, 0]))
+
+        try await eventually { session.cursor != nil }
+        #expect(session.cursor?.image == nil)
+    }
+
     @Test func aLocalClipboardChangeIsSentToTheRemote() async throws {
         let server = try FakeRFBServer()
         defer { server.stop() }
@@ -904,6 +976,14 @@ private func waitForAnnouncements(_ server: FakeRFBServer, _ session: Session) a
 
 /// FramebufferUpdate, 1 rectangle at 0,0 sized 1x1, Raw encoding, one 32-bit pixel.
 private let screenUpdate: [UInt8] = [0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0] + [0, 0, 255, 0]
+
+/// FramebufferUpdate with 1 Cursor pseudo-encoding rectangle (-239) placed at the hotspot: white 32-bit pixels, then
+/// the 1-bit mask, one byte per row here.
+private func cursorUpdate(width: UInt16, height: UInt16, hotspotX: UInt16, hotspotY: UInt16, mask: [UInt8]) -> [UInt8] {
+    let be16 = { (v: UInt16) in [UInt8(v >> 8), UInt8(v & 0xFF)] }
+    let pixels = [UInt8](repeating: 255, count: Int(width) * Int(height) * 4)
+    return [0, 0, 0, 1] + be16(hotspotX) + be16(hotspotY) + be16(width) + be16(height) + [0xFF, 0xFF, 0xFF, 0x11] + pixels + mask
+}
 
 private func desktopSizeRequests(_ server: FakeRFBServer) -> [FakeRFBServer.ClientMessage] {
     server.messages.filter { if case .setDesktopSize = $0 { true } else { false } }

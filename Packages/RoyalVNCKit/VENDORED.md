@@ -43,3 +43,6 @@ Changes from upstream:
   origin, keeping the id of the server's first screen. A request made before the server's first ExtendedDesktopSize
   rectangle is held until it arrives, and never sent to servers without one. `ExtendedDesktopSizeEncoding` reports that
   screen id to the connection.
+- Mouse wheel (#9): `mouseWheel(_:x:y:steps:)` sends each step's release as well as its press. Upstream only cleared
+  the button bit, so a second step the same way repeated the same mask, and wayvnc, which acts on mask changes,
+  ignored it.

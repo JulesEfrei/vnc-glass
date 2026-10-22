@@ -14,6 +14,7 @@ struct FramebufferView: NSViewRepresentable {
     func updateNSView(_ view: FramebufferNSView, context: Context) {
         view.layer?.contents = session.image
         view.isCapturingSystemShortcuts = session.lockMode == .locked
+        view.showRemoteCursor(session.cursor)
     }
 }
 
@@ -155,6 +156,41 @@ final class FramebufferNSView: NSView {
         super.updateTrackingAreas()
     }
 
+    /// Drawn by the system in place of the arrow, so it moves with no round trip to the server.
+    private var remoteCursor: RemoteCursor?
+    /// The remote screen size `remoteCursor` was last scaled for.
+    private var cursorScreenSize: ScreenSize?
+
+    /// Rebuilds the cursor only when it or the remote screen size changed, not on every screen update.
+    func showRemoteCursor(_ cursor: RemoteCursor?) {
+        guard cursor != remoteCursor || session.screenSize != cursorScreenSize else { return }
+        remoteCursor = cursor
+        cursorScreenSize = session.screenSize
+        window?.invalidateCursorRects(for: self)
+    }
+
+    override func resetCursorRects() {
+        guard let remoteCursor, let (rect, scale) = drawnRemoteScreen else { return }
+        // A 1x1 clear image hides the pointer, since NSCursor needs some image.
+        let image = remoteCursor.image.map {
+            NSImage(cgImage: $0, size: NSSize(width: CGFloat($0.width) * scale, height: CGFloat($0.height) * scale))
+        } ?? NSImage(size: NSSize(width: 1, height: 1))
+        let hotSpot = NSPoint(x: remoteCursor.hotspot.x * scale, y: remoteCursor.hotspot.y * scale)
+        addCursorRect(rect, cursor: NSCursor(image: image, hotSpot: hotSpot))
+    }
+
+    /// Points of trackpad travel per wheel click.
+    private static let pointsPerScrollClick = 20.0
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let (x, y) = remotePoint(event) else { return }
+        // Trackpads give points; a mouse wheel gives lines, each worth at least one click however slowly it turns.
+        let (dx, dy) = event.hasPreciseScrollingDeltas
+            ? (event.scrollingDeltaX / Self.pointsPerScrollClick, event.scrollingDeltaY / Self.pointsPerScrollClick)
+            : (event.scrollingDeltaX.rounded(.awayFromZero), event.scrollingDeltaY.rounded(.awayFromZero))
+        session.handle(.scroll(dx: dx, dy: dy, x: x, y: y))
+    }
+
     override func mouseMoved(with event: NSEvent) { pointerMoved(event) }
     override func mouseDragged(with event: NSEvent) { pointerMoved(event) }
     override func rightMouseDragged(with event: NSEvent) { pointerMoved(event) }
@@ -189,15 +225,21 @@ final class FramebufferNSView: NSView {
         session.handle(.key(KeyCode(hidUsage: usage), isDown: isDown))
     }
 
-    /// Maps a window point to remote pixels through the aspect-fit rectangle the layer draws in.
-    private func remotePoint(_ event: NSEvent) -> (Double, Double)? {
+    /// The aspect-fit rectangle the layer draws the remote screen in, and its view points per remote pixel.
+    private var drawnRemoteScreen: (rect: CGRect, scale: CGFloat)? {
         guard let size = session.screenSize, size.width > 0, size.height > 0 else { return nil }
-        let point = convert(event.locationInWindow, from: nil)
         let scale = min(bounds.width / CGFloat(size.width), bounds.height / CGFloat(size.height))
         let drawn = CGSize(width: CGFloat(size.width) * scale, height: CGFloat(size.height) * scale)
         let origin = CGPoint(x: (bounds.width - drawn.width) / 2, y: (bounds.height - drawn.height) / 2)
+        return (CGRect(origin: origin, size: drawn), scale)
+    }
+
+    /// Maps a window point to remote pixels through the aspect-fit rectangle the layer draws in.
+    private func remotePoint(_ event: NSEvent) -> (Double, Double)? {
+        guard let (rect, scale) = drawnRemoteScreen else { return nil }
+        let point = convert(event.locationInWindow, from: nil)
         // AppKit's origin is bottom left, the remote's is top left.
-        return ((point.x - origin.x) / scale, (origin.y + drawn.height - point.y) / scale)
+        return ((point.x - rect.minX) / scale, (rect.maxY - point.y) / scale)
     }
 }
 

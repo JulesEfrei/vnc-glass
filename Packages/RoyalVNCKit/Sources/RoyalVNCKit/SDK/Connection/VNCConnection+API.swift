@@ -101,6 +101,10 @@ public extension VNCConnection {
 
             updateMouseButtonState(wheel: wheel,
                                    isDown: false)
+
+            // Servers that act on mask changes, like wayvnc, ignore a second press without this release.
+            enqueueMouseEvent(nonNormalizedX: x,
+                              nonNormalizedY: y)
         }
     }
 }

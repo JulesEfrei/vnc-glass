@@ -92,4 +92,7 @@ public enum InputEvent: Sendable {
     case key(KeyCode, isDown: Bool)
     case pointerMoved(x: Double, y: Double)
     case pointerButton(PointerButton, isDown: Bool, x: Double, y: Double)
+    /// Scrolling by `dx` and `dy` wheel clicks, fractions included. Positive is up and left, the way the content moves,
+    /// as AppKit's scrolling deltas already turned by the natural-scrolling setting.
+    case scroll(dx: Double, dy: Double, x: Double, y: Double)
 }
