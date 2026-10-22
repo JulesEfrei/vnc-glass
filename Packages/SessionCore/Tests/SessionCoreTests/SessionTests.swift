@@ -356,6 +356,174 @@ struct SessionTests {
         #expect(Set(events.suffix(2)) == [.keyEvent(down: false, keysym: 0xFFEB), .keyEvent(down: false, keysym: 0x31)])
     }
 
+    @Test func theUnlockShortcutTogglesLockModeAndNeverReachesTheRemote() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+
+        press([leftControl, leftOption], session)
+        #expect(session.lockMode == .locked)
+        // Released in the order pressed this time.
+        session.handle(.key(leftControl, isDown: true))
+        session.handle(.key(leftOption, isDown: true))
+        session.handle(.key(leftControl, isDown: false))
+        session.handle(.key(leftOption, isDown: false))
+        #expect(session.lockMode == .unlocked)
+        press([one], session)
+
+        // The 1 key's events land after anything sent before them.
+        try await eventually { keyEvents(server).count == 2 }
+        #expect(keyEvents(server) == [.keyEvent(down: true, keysym: 0x31), .keyEvent(down: false, keysym: 0x31)])
+    }
+
+    @Test func controlOptionTReachesTheRemoteAsCtrlAltTAndLeavesLockModeAlone() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+
+        press([leftControl, leftOption, t], session)
+
+        try await eventually { keyEvents(server).count == 6 }
+        #expect(keyEvents(server) == [
+            .keyEvent(down: true, keysym: 0xFFE3), .keyEvent(down: true, keysym: 0xFFE9), // Control_L, Alt_L
+            .keyEvent(down: true, keysym: 0x74), .keyEvent(down: false, keysym: 0x74), // t
+            .keyEvent(down: false, keysym: 0xFFE9), .keyEvent(down: false, keysym: 0xFFE3),
+        ])
+        #expect(session.lockMode == .unlocked)
+    }
+
+    @Test func aLoneControlTapStillReachesTheRemote() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+
+        press([leftControl], session)
+
+        try await eventually { keyEvents(server).count == 2 }
+        #expect(keyEvents(server) == [.keyEvent(down: true, keysym: 0xFFE3), .keyEvent(down: false, keysym: 0xFFE3)])
+        #expect(session.lockMode == .unlocked)
+    }
+
+    @Test func controlClickReachesTheRemoteWithControlDown() async throws {
+        let server = try FakeRFBServer(width: 64, height: 48)
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+        try await eventually { session.screenSize != nil }
+
+        session.handle(.key(leftControl, isDown: true))
+        session.handle(.pointerButton(.left, isDown: true, x: 1, y: 1))
+
+        try await eventually { keyEvents(server).count == 1 && pointerEvents(server).count == 1 }
+        #expect(keyEvents(server) == [.keyEvent(down: true, keysym: 0xFFE3)])
+        session.handle(.key(leftOption, isDown: true))
+        session.handle(.key(leftOption, isDown: false))
+        session.handle(.key(leftControl, isDown: false))
+        #expect(session.lockMode == .unlocked)
+    }
+
+    @Test func losingTheAbilityToLockUnlocks() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+        session.lock()
+
+        session.isLockModeAvailable = false
+
+        #expect(session.lockMode == .unlocked)
+    }
+
+    @Test func losingWindowFocusPausesLockModeAndRegainingItResumes() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+        session.toggleLockMode()
+        #expect(session.lockMode == .locked)
+
+        session.windowFocusChanged(isFocused: false)
+        #expect(session.lockMode == .paused)
+
+        session.windowFocusChanged(isFocused: true)
+        #expect(session.lockMode == .locked)
+    }
+
+    @Test func focusChangesLeaveAnUnlockedSessionUnlocked() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+
+        session.windowFocusChanged(isFocused: false)
+        session.windowFocusChanged(isFocused: true)
+
+        #expect(session.lockMode == .unlocked)
+    }
+
+    @Test func disconnectingWhileLockedUnlocks() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+        session.lock()
+
+        session.disconnect()
+
+        #expect(session.lockMode == .unlocked)
+        try await eventually {
+            if case .disconnected = session.state { true } else { false }
+        }
+        #expect(session.lockMode == .unlocked)
+    }
+
+    @Test func theServerDroppingTheConnectionUnlocks() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+        session.lock()
+
+        server.dropConnection()
+
+        try await eventually { session.lockMode == .unlocked }
+    }
+
+    @Test(arguments: [false, true])
+    func pausingOrUnlockingReleasesEveryHeldKey(byLosingFocus: Bool) async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+        session.lock()
+        session.handle(.key(leftCmd, isDown: true))
+        session.handle(.key(one, isDown: true))
+
+        if byLosingFocus { session.windowFocusChanged(isFocused: false) } else { session.toggleLockMode() }
+
+        try await eventually { keyEvents(server).count == 4 }
+        #expect(Set(keyEvents(server).suffix(2)) == [
+            .keyEvent(down: false, keysym: 0xFFEB), .keyEvent(down: false, keysym: 0x31),
+        ])
+        #expect(session.lockMode == (byLosingFocus ? .paused : .unlocked))
+    }
+
+    @Test func lockModeIsUnavailableUntilAllowed() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+        session.isLockModeAvailable = false
+
+        session.lock()
+        press([leftControl, leftOption], session)
+        #expect(session.lockMode == .unlocked)
+
+        session.isLockModeAvailable = true
+        session.lock()
+        #expect(session.lockMode == .locked)
+    }
+
+    @Test func lockModeNeedsAConnectedSession() {
+        let session = Session(address: "127.0.0.1", port: 1)
+
+        session.lock()
+
+        #expect(session.lockMode == .unlocked)
+    }
+
     @Test func pointerMovementAndClicksReachTheRemote() async throws {
         let server = try FakeRFBServer(width: 64, height: 48)
         defer { server.stop() }
@@ -445,11 +613,13 @@ struct SessionTests {
 }
 
 // USB HID usages of the keys the keyboard tests press.
+private let leftControl = KeyCode(hidUsage: 0xE0)
 private let leftOption = KeyCode(hidUsage: 0xE2)
 private let leftCmd = KeyCode(hidUsage: 0xE3)
 private let rightOption = KeyCode(hidUsage: 0xE6)
 private let one = KeyCode(hidUsage: 0x1E)
 private let c = KeyCode(hidUsage: 0x06)
+private let t = KeyCode(hidUsage: 0x17)
 
 /// Presses the keys in order, then releases them in reverse, as a chord.
 @MainActor

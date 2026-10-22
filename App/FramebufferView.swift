@@ -13,6 +13,7 @@ struct FramebufferView: NSViewRepresentable {
 
     func updateNSView(_ view: FramebufferNSView, context: Context) {
         view.layer?.contents = session.image
+        view.isCapturingSystemShortcuts = session.lockMode == .locked
     }
 }
 
@@ -39,13 +40,90 @@ final class FramebufferNSView: NSView {
         window?.makeFirstResponder(self)
         if let keyUpMonitor { NSEvent.removeMonitor(keyUpMonitor) }
         keyUpMonitor = nil
-        guard window != nil else { return }
+        NotificationCenter.default.removeObserver(self)
+        guard window != nil else {
+            isCapturingSystemShortcuts = false
+            return
+        }
+        session.isLockModeAvailable = AXIsProcessTrusted()
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(windowDidBecomeKey), name: NSWindow.didBecomeKeyNotification, object: window)
+        center.addObserver(self, selector: #selector(windowDidResignKey), name: NSWindow.didResignKeyNotification, object: window)
+        center.addObserver(self, selector: #selector(windowDidEnterFullScreen), name: NSWindow.didEnterFullScreenNotification,
+                           object: window)
         keyUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyUp) { [weak self] event in
             guard let self, event.modifierFlags.contains(.command), event.window === window,
                   window?.firstResponder === self else { return event }
             forwardKey(event, isDown: false)
             return nil
         }
+    }
+
+    // Checked on every focus, so a permission granted in System Settings works once the user comes back.
+    @objc private func windowDidBecomeKey() {
+        session.isLockModeAvailable = AXIsProcessTrusted()
+        session.windowFocusChanged(isFocused: true)
+    }
+
+    @objc private func windowDidResignKey() { session.windowFocusChanged(isFocused: false) }
+    @objc private func windowDidEnterFullScreen() { session.lock() }
+
+    /// While Locked, an active event tap takes every key before macOS acts on it, so ⌘Tab, ⌘Space and ⌘Q reach the
+    /// remote instead (ADR-0001). Needs the Accessibility permission.
+    var isCapturingSystemShortcuts: Bool {
+        get { keyTap != nil }
+        set {
+            guard newValue != isCapturingSystemShortcuts else { return }
+            if newValue { startKeyTap() } else { stopKeyTap() }
+        }
+    }
+
+    private var keyTap: CFMachPort?
+    private var keyTapSource: CFRunLoopSource?
+
+    private func startKeyTap() {
+        let types: [CGEventType] = [.keyDown, .keyUp, .flagsChanged]
+        let mask = types.reduce(CGEventMask(0)) { $0 | 1 << $1.rawValue }
+        // The view outlives the tap: the tap stops when Lock Mode ends or the view leaves its window.
+        guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
+                                          eventsOfInterest: mask, callback: { _, type, event, view in
+            // The tap's run loop source is on the main run loop.
+            nonisolated(unsafe) let event = event
+            let isSwallowed = MainActor.assumeIsolated {
+                Unmanaged<FramebufferNSView>.fromOpaque(view!).takeUnretainedValue().tapped(type, event)
+            }
+            return isSwallowed ? nil : Unmanaged.passUnretained(event)
+        }, userInfo: Unmanaged.passUnretained(self).toOpaque()) else {
+            // Refused, as when the permission was revoked since the last check; the Session then unlocks.
+            session.isLockModeAvailable = false
+            return
+        }
+        keyTap = tap
+        keyTapSource = CFMachPortCreateRunLoopSource(nil, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), keyTapSource, .commonModes)
+    }
+
+    private func stopKeyTap() {
+        guard let keyTap else { return }
+        CGEvent.tapEnable(tap: keyTap, enable: false)
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), keyTapSource, .commonModes)
+        CFMachPortInvalidate(keyTap)
+        self.keyTap = nil
+        keyTapSource = nil
+    }
+
+    /// Hands a tapped key to the Session. True when macOS should not see it.
+    private func tapped(_ type: CGEventType, _ event: CGEvent) -> Bool {
+        switch type {
+        case .tapDisabledByTimeout, .tapDisabledByUserInput:
+            if let keyTap { CGEvent.tapEnable(tap: keyTap, enable: true) }
+            return false
+        case .keyDown: NSEvent(cgEvent: event).map { forwardKey($0, isDown: true) }
+        case .keyUp: NSEvent(cgEvent: event).map { forwardKey($0, isDown: false) }
+        case .flagsChanged: NSEvent(cgEvent: event).map(flagsChanged)
+        default: return false
+        }
+        return true
     }
 
     override func updateTrackingAreas() {

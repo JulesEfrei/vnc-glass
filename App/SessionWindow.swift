@@ -34,6 +34,7 @@ struct SessionWindow: View {
             .navigationSubtitle("\(connection.address):\(connection.port)")
             .toolbar {
                 if session.state == .connected {
+                    LockModeButton(session: session)
                     Button("Disconnect", systemImage: "xmark", action: session.disconnect)
                 } else if case .disconnected = session.state {
                     Button("Connect", systemImage: "arrow.clockwise", action: session.connect)
@@ -76,6 +77,41 @@ struct SessionWindow: View {
         case .disconnected(.unsupportedSecurityType?):
             "The server only offers login methods VNC Glass does not support."
         case .disconnected(.other(let message)?): "Disconnected: \(message)"
+        }
+    }
+}
+
+/// Shows the Session's Lock Mode and turns it on and off, or explains the missing permission.
+private struct LockModeButton: View {
+    let session: Session
+    @State private var isExplainingPermission = false
+
+    var body: some View {
+        Button {
+            if session.isLockModeAvailable { session.toggleLockMode() } else { isExplainingPermission = true }
+        } label: {
+            if !session.isLockModeAvailable {
+                Label("Lock Mode Unavailable", systemImage: "lock.trianglebadge.exclamationmark")
+            } else {
+                switch session.lockMode {
+                case .unlocked: Label("Unlocked", systemImage: "lock.open")
+                case .locked: Label("Locked", systemImage: "lock.fill")
+                case .paused: Label("Paused", systemImage: "lock")
+                }
+            }
+        }
+        .labelStyle(.titleAndIcon)
+        .help("Lock Mode sends every shortcut, like ⌘Tab and ⌘Q, to the remote computer. Press and release left ⌃⌥ to turn it on or off.")
+        .alert("Lock Mode needs the Accessibility permission", isPresented: $isExplainingPermission) {
+            Button("Open System Settings") {
+                // Asking adds VNC Glass to the Accessibility list, so the user only has to turn it on. The key is
+                // kAXTrustedCheckOptionPrompt, which Swift 6 rejects as a mutable global.
+                AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
+                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("To send shortcuts like ⌘Tab and ⌘Space to the remote computer instead of the Mac, turn on VNC Glass in Privacy & Security › Accessibility.")
         }
     }
 }

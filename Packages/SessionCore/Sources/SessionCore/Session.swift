@@ -42,6 +42,14 @@ public final class Session {
         case disconnected(Failure?)
     }
 
+    public enum LockMode: Equatable, Sendable {
+        case unlocked
+        /// Every keystroke goes to the remote and none act on the Mac.
+        case locked
+        /// Locked, but the window is not focused; becomes locked again when it is.
+        case paused
+    }
+
     public enum Failure: Equatable, Sendable {
         /// The address did not resolve, or nothing answered at it.
         case unreachable
@@ -67,6 +75,11 @@ public final class Session {
     /// The server let the Session in without any login (security type None) and the address is not a Tailscale one, so
     /// anyone who can reach the server can control it.
     public private(set) var isUnauthenticatedOutsideTailscale = false
+    public private(set) var lockMode = LockMode.unlocked
+    /// False while the platform cannot capture system shortcuts, as without the Accessibility permission on macOS.
+    public var isLockModeAvailable = true {
+        didSet { if !isLockModeAvailable && lockMode != .unlocked { leaveLock(to: .unlocked) } }
+    }
 
     @ObservationIgnored private var link: VNCConnection?
     @ObservationIgnored private var linkDelegate: LinkDelegate?
@@ -83,6 +96,10 @@ public final class Session {
     /// Remote keys sent down and not yet up, with how many local keys hold each (both ⌥ keys hold Alt_L).
     /// Released on disconnect so none stay stuck (wayvnc #461).
     @ObservationIgnored private var heldKeys: [KeyCode: Int] = [:]
+    /// Unlock Shortcut keys pressed and not yet forwarded, since they may turn out to be the shortcut.
+    @ObservationIgnored private var shortcutKeys: [KeyCode] = []
+    /// The Unlock Shortcut has fired and the rest of its keys are still being released.
+    @ObservationIgnored private var isShortcutFired = false
 
     public init(address: String, port: UInt16, username: String = "", password: String? = nil,
                 keyboardProfile: KeyboardProfile = .default, knownServerKeys: UserDefaults = .standard) {
@@ -122,8 +139,32 @@ public final class Session {
     public func disconnect() {
         cancelCredentials()
         rejectServerKey()
+        lockMode = .unlocked
         releaseHeldKeys()
         link?.disconnect()
+    }
+
+    /// Turns Lock Mode on, as when the window goes full screen.
+    public func lock() {
+        guard state == .connected, isLockModeAvailable else { return }
+        lockMode = .locked
+    }
+
+    public func toggleLockMode() {
+        if lockMode == .unlocked { lock() } else { leaveLock(to: .unlocked) }
+    }
+
+    public func windowFocusChanged(isFocused: Bool) {
+        switch (lockMode, isFocused) {
+        case (.locked, false): leaveLock(to: .paused)
+        case (.paused, true): lockMode = .locked
+        default: break
+        }
+    }
+
+    private func leaveLock(to mode: LockMode) {
+        lockMode = mode
+        releaseHeldKeys()
     }
 
     /// Accepts the changed server key, remembers it in place of the old one and goes on connecting.
@@ -172,20 +213,14 @@ public final class Session {
         guard let link, state == .connected else { return }
         switch event {
         case .key(let key, let isDown):
-            let remoteKey = keyboardProfile.remoteKey(for: key)
-            guard let (keysym, scancode) = remoteKey.remote else { return }
-            if isDown {
-                heldKeys[remoteKey, default: 0] += 1
-                if heldKeys[remoteKey] == 1 { link.keyDown(VNCKeyCode(keysym), scancode: scancode) }
-            } else if let count = heldKeys[remoteKey] {
-                heldKeys[remoteKey] = count > 1 ? count - 1 : nil
-                if count == 1 { link.keyUp(VNCKeyCode(keysym), scancode: scancode) }
-            }
+            handleKey(key, isDown: isDown)
         case .pointerMoved(let x, let y):
             guard let (x, y) = remotePixel(x, y) else { return }
             link.mouseMove(x: x, y: y)
         case .pointerButton(let button, let isDown, let x, let y):
             guard let (x, y) = remotePixel(x, y) else { return }
+            // A click means the held-back keys are not the Unlock Shortcut, and ⌃-click needs its ⌃.
+            forwardShortcutKeys()
             let button: VNCMouseButton = button == .left ? .left : .right
             if isDown {
                 link.mouseButtonDown(button, x: x, y: y)
@@ -195,12 +230,61 @@ public final class Session {
         }
     }
 
+    /// Holds back left ⌃ and left ⌥ pressed with nothing else down: released with no other key in between, they are
+    /// the Unlock Shortcut and never reach the remote; any other key forwards them first.
+    private func handleKey(_ key: KeyCode, isDown: Bool) {
+        if isDown {
+            if Self.unlockShortcut.contains(key), !isShortcutFired, heldKeys.isEmpty, !shortcutKeys.contains(key) {
+                shortcutKeys.append(key)
+                return
+            }
+            forwardShortcutKeys()
+        } else if shortcutKeys.contains(key) {
+            if isShortcutFired || shortcutKeys.count == Self.unlockShortcut.count {
+                shortcutKeys.removeAll { $0 == key }
+                if isShortcutFired {
+                    isShortcutFired = !shortcutKeys.isEmpty
+                } else {
+                    isShortcutFired = true
+                    toggleLockMode()
+                }
+                return
+            }
+            forwardShortcutKeys()
+        }
+        send(key, isDown: isDown)
+    }
+
+    private static let unlockShortcut: Set = [KeyCode(hidUsage: 0xE0), KeyCode(hidUsage: 0xE2)] // left ⌃, left ⌥
+
+    private func forwardShortcutKeys() {
+        let keys = shortcutKeys
+        shortcutKeys = []
+        isShortcutFired = false
+        keys.forEach { send($0, isDown: true) }
+    }
+
+    private func send(_ key: KeyCode, isDown: Bool) {
+        guard let link else { return }
+        let remoteKey = keyboardProfile.remoteKey(for: key)
+        guard let (keysym, scancode) = remoteKey.remote else { return }
+        if isDown {
+            heldKeys[remoteKey, default: 0] += 1
+            if heldKeys[remoteKey] == 1 { link.keyDown(VNCKeyCode(keysym), scancode: scancode) }
+        } else if let count = heldKeys[remoteKey] {
+            heldKeys[remoteKey] = count > 1 ? count - 1 : nil
+            if count == 1 { link.keyUp(VNCKeyCode(keysym), scancode: scancode) }
+        }
+    }
+
     private func releaseHeldKeys() {
         for key in heldKeys.keys {
             guard let (keysym, scancode) = key.remote else { continue }
             link?.keyUp(VNCKeyCode(keysym), scancode: scancode)
         }
         heldKeys = [:]
+        shortcutKeys = []
+        isShortcutFired = false
     }
 
     private func remotePixel(_ x: Double, _ y: Double) -> (UInt16, UInt16)? {
@@ -223,6 +307,9 @@ public final class Session {
             serverKeyReply = nil
             serverKeyChange = nil
             heldKeys = [:]
+            shortcutKeys = []
+            isShortcutFired = false
+            lockMode = .unlocked
             if failure == .authenticationFailed { savedPassword = nil }
             state = .disconnected(failure)
         case .disconnecting: break
