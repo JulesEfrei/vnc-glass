@@ -557,6 +557,105 @@ struct SessionTests {
         #expect(pointerEvents(server) == [.pointerEvent(buttonMask: 0, x: 0, y: 47)])
     }
 
+    @Test func aLocalClipboardChangeIsSentToTheRemote() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+
+        session.localClipboardChanged(text: "café", types: ["public.utf8-plain-text"])
+
+        try await eventually { !cutTexts(server).isEmpty }
+        #expect(cutTexts(server) == [.clientCutText([0x63, 0x61, 0x66, 0xE9])]) // Latin-1
+    }
+
+    @Test(arguments: ["org.nspasteboard.ConcealedType", "org.nspasteboard.TransientType"])
+    func concealedAndTransientClipboardItemsAreNeverSent(marker: String) async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+
+        session.localClipboardChanged(text: "hunter2", types: ["public.utf8-plain-text", marker])
+        // Messages arrive in order, so once this one is in, the secret would have been too.
+        session.localClipboardChanged(text: "ok", types: ["public.utf8-plain-text"])
+
+        try await eventually { !cutTexts(server).isEmpty }
+        #expect(cutTexts(server) == [.clientCutText(Array("ok".utf8))])
+    }
+
+    @Test func theRemoteClipboardIsReceivedAsText() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+        #expect(session.remoteClipboardText == nil)
+
+        server.send(serverCutText([0x63, 0x61, 0x66, 0xE9])) // "café" in Latin-1
+
+        try await eventually { session.remoteClipboardText == "café" }
+    }
+
+    @Test func textJustReceivedFromTheRemoteIsNotSentBack() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+        server.send(serverCutText(Array("from remote".utf8)))
+        try await eventually { session.remoteClipboardText == "from remote" }
+
+        // The platform writes it to the Mac's clipboard, which then reports the change.
+        session.localClipboardChanged(text: "from remote", types: ["public.utf8-plain-text"])
+        session.localClipboardChanged(text: "from mac", types: ["public.utf8-plain-text"])
+
+        try await eventually { !cutTexts(server).isEmpty }
+        #expect(cutTexts(server) == [.clientCutText(Array("from mac".utf8))])
+        #expect(session.remoteClipboardText == nil)
+    }
+
+    @Test func textTheRemoteEchoesBackIsNotWrittenToTheMac() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+        session.localClipboardChanged(text: "from mac", types: ["public.utf8-plain-text"])
+        try await eventually { !cutTexts(server).isEmpty }
+
+        server.send(serverCutText(Array("from mac".utf8)))
+        // The Session reads in order, so once this screen update lands the echo has been handled.
+        server.send(screenUpdate)
+        try await eventually { session.image != nil }
+        #expect(session.remoteClipboardText == nil)
+
+        server.send(serverCutText(Array("from remote".utf8)))
+        try await eventually { session.remoteClipboardText == "from remote" }
+    }
+
+    @Test func anEchoOfTextLatin1CouldNotCarryIsStillRecognized() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+        session.localClipboardChanged(text: "a→b", types: ["public.utf8-plain-text"])
+        try await eventually { !cutTexts(server).isEmpty }
+        #expect(cutTexts(server) == [.clientCutText(Array("a?b".utf8))])
+
+        server.send(serverCutText(Array("a?b".utf8)))
+        server.send(screenUpdate)
+        try await eventually { session.image != nil }
+
+        #expect(session.remoteClipboardText == nil)
+    }
+
+    @Test func copyingSomethingOtherThanTextOnTheMacLetsTheSameRemoteTextArriveAgain() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+        server.send(serverCutText(Array("from remote".utf8)))
+        try await eventually { session.remoteClipboardText == "from remote" }
+
+        session.localClipboardChanged(text: nil, types: ["public.png"])
+        #expect(session.remoteClipboardText == nil)
+
+        server.send(serverCutText(Array("from remote".utf8)))
+        try await eventually { session.remoteClipboardText == "from remote" }
+        #expect(cutTexts(server).isEmpty)
+    }
+
     @Test func aRefusedConnectionSaysSo() async throws {
         let server = try FakeRFBServer()
         server.stop() // Nothing listens on the port any more.
@@ -658,10 +757,12 @@ private func loggedInSession(to server: FakeRFBServer, knownServerKeys: UserDefa
 @MainActor
 private func waitForAnnouncements(_ server: FakeRFBServer, _ session: Session) async throws {
     try await eventually { server.messages.contains { if case .setEncodings = $0 { true } else { false } } }
-    // FramebufferUpdate, 1 rectangle at 0,0 sized 1x1, Raw encoding, one 32-bit pixel.
-    server.send([0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0] + [0, 0, 255, 0])
+    server.send(screenUpdate)
     try await eventually { session.image != nil }
 }
+
+/// FramebufferUpdate, 1 rectangle at 0,0 sized 1x1, Raw encoding, one 32-bit pixel.
+private let screenUpdate: [UInt8] = [0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0] + [0, 0, 255, 0]
 
 private func keyEvents(_ server: FakeRFBServer) -> [FakeRFBServer.ClientMessage] {
     server.messages.filter {
@@ -683,6 +784,15 @@ func eventually(timeout: Duration = .seconds(5), _ condition: () -> Bool) async 
         }
         try await Task.sleep(for: .milliseconds(10))
     }
+}
+
+/// ServerCutText: type 3, 3 bytes of padding, the length, then the Latin-1 text.
+private func serverCutText(_ text: [UInt8]) -> [UInt8] {
+    [3, 0, 0, 0] + withUnsafeBytes(of: UInt32(text.count).bigEndian, Array.init) + text
+}
+
+private func cutTexts(_ server: FakeRFBServer) -> [FakeRFBServer.ClientMessage] {
+    server.messages.filter { if case .clientCutText = $0 { true } else { false } }
 }
 
 private func pointerEvents(_ server: FakeRFBServer) -> [FakeRFBServer.ClientMessage] {

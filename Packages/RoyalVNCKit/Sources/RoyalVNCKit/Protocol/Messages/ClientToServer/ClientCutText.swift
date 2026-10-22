@@ -16,7 +16,7 @@ extension VNCProtocol {
 
 extension VNCProtocol.ClientCutText {
 	var data: Data {
-		var latin1TextData = text.data(using: Self.stringEncoding) ?? .init()
+		var latin1TextData = text.data(using: Self.stringEncoding, allowLossyConversion: true) ?? .init()
 		var textLength = latin1TextData.count
 
 		if textLength > UInt32.max {

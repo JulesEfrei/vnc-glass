@@ -76,6 +76,9 @@ public final class Session {
     /// anyone who can reach the server can control it.
     public private(set) var isUnauthenticatedOutsideTailscale = false
     public private(set) var lockMode = LockMode.unlocked
+    /// Text the remote computer put on its clipboard, for the platform to write to the local one. Nil once the local
+    /// clipboard has changed since.
+    public private(set) var remoteClipboardText: String?
     /// False while the platform cannot capture system shortcuts, as without the Accessibility permission on macOS.
     public var isLockModeAvailable = true {
         didSet { if !isLockModeAvailable && lockMode != .unlocked { leaveLock(to: .unlocked) } }
@@ -100,6 +103,8 @@ public final class Session {
     @ObservationIgnored private var shortcutKeys: [KeyCode] = []
     /// The Unlock Shortcut has fired and the rest of its keys are still being released.
     @ObservationIgnored private var isShortcutFired = false
+    /// The local clipboard text last sent, until the remote clipboard changes, so the server's echo of it is ignored.
+    @ObservationIgnored private var sentClipboardText: String?
 
     public init(address: String, port: UInt16, username: String = "", password: String? = nil,
                 keyboardProfile: KeyboardProfile = .default, knownServerKeys: UserDefaults = .standard) {
@@ -209,6 +214,21 @@ public final class Session {
         reply?.send(credential)
     }
 
+    /// The Mac's clipboard changed to `text`, nil when it holds no text. `types` are the pasteboard types of the item.
+    public func localClipboardChanged(text: String?, types: [String]) {
+        guard let link, state == .connected, text == nil || text != remoteClipboardText else { return }
+        remoteClipboardText = nil
+        sentClipboardText = nil
+        // nspasteboard.org markers: password managers flag secrets as concealed, and transient items are not meant to persist.
+        guard let text, !types.contains(where: Self.privateClipboardTypes.contains) else { return }
+        // As the server receives it, with `?` for what Latin-1 lacks, so its echo is recognized.
+        sentClipboardText = text.data(using: .isoLatin1, allowLossyConversion: true)
+            .flatMap { String(data: $0, encoding: .isoLatin1) }
+        link.sendClipboardText(text)
+    }
+
+    private static let privateClipboardTypes: Set = ["org.nspasteboard.ConcealedType", "org.nspasteboard.TransientType"]
+
     public func handle(_ event: InputEvent) {
         guard let link, state == .connected else { return }
         switch event {
@@ -310,6 +330,8 @@ public final class Session {
             shortcutKeys = []
             isShortcutFired = false
             lockMode = .unlocked
+            remoteClipboardText = nil
+            sentClipboardText = nil
             if failure == .authenticationFailed { savedPassword = nil }
             state = .disconnected(failure)
         case .disconnecting: break
@@ -343,6 +365,12 @@ public final class Session {
         var ip = in_addr()
         guard inet_pton(AF_INET, address, &ip) == 1 else { return false }
         return UInt32(bigEndian: ip.s_addr) & 0xFFC0_0000 == 0x6440_0000
+    }
+
+    fileprivate func remoteClipboardChanged(_ text: String) {
+        guard text != sentClipboardText else { return }
+        sentClipboardText = nil
+        remoteClipboardText = text
     }
 
     fileprivate func framebufferChanged() {
@@ -403,6 +431,10 @@ private final class LinkDelegate: NSObject, VNCConnectionDelegate, Sendable {
     }
 
     func connection(_ connection: VNCConnection, didUpdateCursor cursor: VNCCursor) {}
+
+    func connection(_ connection: VNCConnection, didReceiveClipboardText text: String) {
+        Task { @MainActor [weak session] in session?.remoteClipboardChanged(text) }
+    }
 
     /// Schedules one render for a burst of changes. The flag is cleared before rendering,
     /// so a change landing during a render schedules another one and is never lost.

@@ -34,6 +34,11 @@ extension VNCConnection {
 							 didUpdateCursor: cursor)
 	}
 
+	func notifyDelegateAboutClipboardText(_ text: String) {
+		delegate?.connection(self,
+							 didReceiveClipboardText: text)
+	}
+
 	/// Throws unless the delegate trusts the server's key.
 	func askDelegateToTrustServerKey(fingerprint: Data) async throws {
 		guard let delegate else {

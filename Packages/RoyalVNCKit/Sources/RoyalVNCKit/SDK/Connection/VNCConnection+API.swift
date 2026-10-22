@@ -164,3 +164,14 @@ public extension VNCConnection {
 		enqueueKeyEvent(key: key, scancode: scancode, isDown: false)
 	}
 }
+
+// MARK: - Clipboard
+public extension VNCConnection {
+	/// Sends the text as ClientCutText, in Latin-1; characters Latin-1 lacks are replaced.
+#if canImport(ObjectiveC)
+    @objc
+#endif
+	func sendClipboardText(_ text: String) {
+		enqueueClientCutTextMessage(text)
+	}
+}

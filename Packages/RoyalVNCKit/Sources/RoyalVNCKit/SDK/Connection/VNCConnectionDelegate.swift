@@ -55,4 +55,12 @@ public protocol VNCConnectionDelegate: AnyObject {
 #endif
 	func connection(_ connection: VNCConnection,
 					didUpdateCursor cursor: VNCCursor)
+
+	/// The server's clipboard changed to `text` (ServerCutText). Not called while clipboard redirection is enabled,
+	/// which writes the text to the pasteboard instead.
+#if canImport(ObjectiveC)
+    @objc
+#endif
+	func connection(_ connection: VNCConnection,
+					didReceiveClipboardText text: String)
 }

@@ -25,3 +25,8 @@ Changes from upstream:
   keys given with `keyDown(_:scancode:)`/`keyUp(_:scancode:)` as client message 255 with their XT scancode.
   `disconnect()` while connected now lets the send queue drain first, so key releases queued just before it reach the
   server (wayvnc #461).
+- Clipboard (#6): with clipboard redirection off, ServerCutText goes to the new delegate method
+  `connection(_:didReceiveClipboardText:)` instead of being dropped, and `sendClipboardText(_:)` sends ClientCutText.
+  ClientCutText replaces characters Latin-1 lacks with `?` instead of sending an empty clipboard. Extended Clipboard
+  ServerCutText, never announced, is ignored rather than written to the pasteboard as empty text. The C SDK drops
+  the server's clipboard when redirection is off.

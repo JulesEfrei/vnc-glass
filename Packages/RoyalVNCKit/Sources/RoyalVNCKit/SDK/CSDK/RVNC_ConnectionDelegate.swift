@@ -152,4 +152,8 @@ extension VNCConnectionDelegate_C: VNCConnectionDelegate {
             cursor.unretainedPointer()
         )
     }
+
+    // The C SDK has no callback for this; with clipboard redirection off, the server's clipboard is dropped.
+    func connection(_ connection: VNCConnection,
+                    didReceiveClipboardText text: String) {}
 }

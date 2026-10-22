@@ -107,7 +107,14 @@ private extension VNCConnection {
 
 		logger.logDebug("Received Clipboard Text from Server")
 
-		guard settings.isClipboardRedirectionEnabled else { return }
+		// Extended Clipboard is never announced, so an extended message carries no text for us.
+		guard serverCutText.extended == nil else { return }
+
+		guard settings.isClipboardRedirectionEnabled else {
+			notifyDelegateAboutClipboardText(text)
+
+			return
+		}
 
 		clipboard.text = text
 	}

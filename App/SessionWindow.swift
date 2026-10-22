@@ -60,8 +60,31 @@ struct SessionWindow: View {
                 New key: \(session.serverKeyChange?.fingerprint ?? "")
                 """)
             }
+            .task(id: session.state == .connected) {
+                if session.state == .connected { await sendLocalClipboard() }
+            }
+            .onChange(of: session.remoteClipboardText) { _, text in
+                guard let text else { return }
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+            }
             .onAppear(perform: session.connect)
             .onDisappear(perform: session.disconnect)
+    }
+
+    /// Hands every change of the Mac's clipboard text to the Session, starting with what is on it now. The pasteboard
+    /// has no change notification, so it is polled until the task is cancelled.
+    private func sendLocalClipboard() async {
+        var changeCount: Int?
+        while !Task.isCancelled {
+            let pasteboard = NSPasteboard.general
+            if pasteboard.changeCount != changeCount {
+                changeCount = pasteboard.changeCount
+                session.localClipboardChanged(text: pasteboard.string(forType: .string),
+                                              types: pasteboard.types?.map(\.rawValue) ?? [])
+            }
+            try? await Task.sleep(for: .milliseconds(500))
+        }
     }
 
     private var status: String? {

@@ -913,6 +913,17 @@ extension VNCCAFramebufferView: VNCConnectionDelegate {
     // Passthrough
     public func connection(
         _ connection: VNCConnection,
+        didReceiveClipboardText text: String
+    ) {
+        delegate?.connection(
+            connection,
+            didReceiveClipboardText: text
+        )
+    }
+
+    // Passthrough
+    public func connection(
+        _ connection: VNCConnection,
         didCreateFramebuffer framebuffer: VNCFramebuffer
     ) {
         guard let delegate else {
