@@ -1,0 +1,166 @@
+import CoreGraphics
+import Foundation
+import Observation
+import RoyalVNCKit
+import Synchronization
+
+public struct ScreenSize: Equatable, Sendable {
+    public let width: Int
+    public let height: Int
+
+    public init(width: Int, height: Int) {
+        self.width = width
+        self.height = height
+    }
+}
+
+/// One live link to a remote computer.
+@MainActor @Observable
+public final class Session {
+    public enum State: Equatable, Sendable {
+        case connecting
+        case connected
+        case disconnected(error: String?)
+    }
+
+    public let address: String
+    public let port: UInt16
+    public private(set) var state: State = .disconnected(error: nil)
+    public private(set) var screenSize: ScreenSize?
+    /// The latest picture of the remote screen.
+    public private(set) var image: CGImage?
+
+    @ObservationIgnored private var link: VNCConnection?
+    @ObservationIgnored private var linkDelegate: LinkDelegate?
+
+    public init(address: String, port: UInt16) {
+        self.address = address
+        self.port = port
+    }
+
+    public func connect() {
+        guard case .disconnected = state else { return }
+        let settings = VNCConnection.Settings(
+            isDebugLoggingEnabled: false,
+            hostname: address,
+            port: port,
+            isShared: true,
+            isScalingEnabled: true,
+            useDisplayLink: false,
+            inputMode: .forwardKeyboardShortcutsIfNotInUseLocally, // .none drops all input; the other modes only matter to RoyalVNCKit's own view
+            isClipboardRedirectionEnabled: false,
+            colorDepth: .depth24Bit,
+            frameEncodings: .default
+        )
+        let link = VNCConnection(settings: settings)
+        let linkDelegate = LinkDelegate(session: self)
+        link.delegate = linkDelegate
+        self.link = link
+        self.linkDelegate = linkDelegate
+        state = .connecting
+        link.connect()
+    }
+
+    public func disconnect() {
+        link?.disconnect()
+    }
+
+    public func handle(_ event: InputEvent) {
+        guard let link, state == .connected else { return }
+        switch event {
+        case .key(let key, let isDown):
+            // shortcut: only keys with a fixed unmodified keysym are sent; Keyboard Profiles (#4) replace this.
+            guard let keysym = key.keysym else { return }
+            if isDown {
+                link.keyDown(VNCKeyCode(keysym))
+            } else {
+                link.keyUp(VNCKeyCode(keysym))
+            }
+        case .pointerMoved(let x, let y):
+            guard let (x, y) = remotePixel(x, y) else { return }
+            link.mouseMove(x: x, y: y)
+        case .pointerButton(let button, let isDown, let x, let y):
+            guard let (x, y) = remotePixel(x, y) else { return }
+            let button: VNCMouseButton = button == .left ? .left : .right
+            if isDown {
+                link.mouseButtonDown(button, x: x, y: y)
+            } else {
+                link.mouseButtonUp(button, x: x, y: y)
+            }
+        }
+    }
+
+    private func remotePixel(_ x: Double, _ y: Double) -> (UInt16, UInt16)? {
+        guard let screenSize, screenSize.width > 0, screenSize.height > 0 else { return nil }
+        let maxX = Double(screenSize.width - 1)
+        let maxY = Double(screenSize.height - 1)
+        return (UInt16(min(max(x, 0), maxX)), UInt16(min(max(y, 0), maxY)))
+    }
+
+    fileprivate func linkStatusChanged(_ status: VNCConnection.Status, error: String?) {
+        switch status {
+        case .connecting: state = .connecting
+        case .connected: state = .connected
+        case .disconnected: state = .disconnected(error: error)
+        case .disconnecting: break
+        }
+    }
+
+    fileprivate func framebufferChanged() {
+        guard let framebuffer = link?.framebuffer else { return }
+        screenSize = ScreenSize(width: Int(framebuffer.size.width), height: Int(framebuffer.size.height))
+        if let image = framebuffer.cgImage { self.image = image }
+    }
+}
+
+/// Receives RoyalVNCKit callbacks on its own queue and hands them to the Session on the main actor.
+private final class LinkDelegate: NSObject, VNCConnectionDelegate, Sendable {
+    nonisolated(unsafe) weak var session: Session?
+    private let isScheduled = Mutex(false)
+
+    init(session: Session) {
+        self.session = session
+    }
+
+    func connection(_ connection: VNCConnection, stateDidChange connectionState: VNCConnection.ConnectionState) {
+        let status = connectionState.status
+        let error = connectionState.error.map { ($0 as NSError).localizedDescription }
+        Task { @MainActor [weak session] in session?.linkStatusChanged(status, error: error) }
+    }
+
+    func connection(_ connection: VNCConnection,
+                    credentialFor authenticationType: VNCAuthenticationType,
+                    completion: @escaping (VNCCredential?) -> Void) {
+        completion(nil)
+    }
+
+    func connection(_ connection: VNCConnection, didCreateFramebuffer framebuffer: VNCFramebuffer) {
+        framebufferChanged()
+    }
+
+    func connection(_ connection: VNCConnection, didResizeFramebuffer framebuffer: VNCFramebuffer) {
+        framebufferChanged()
+    }
+
+    func connection(_ connection: VNCConnection,
+                    didUpdateFramebuffer framebuffer: VNCFramebuffer,
+                    x: UInt16, y: UInt16, width: UInt16, height: UInt16) {
+        framebufferChanged()
+    }
+
+    func connection(_ connection: VNCConnection, didUpdateCursor cursor: VNCCursor) {}
+
+    /// Schedules one render for a burst of changes. The flag is cleared before rendering,
+    /// so a change landing during a render schedules another one and is never lost.
+    private func framebufferChanged() {
+        let alreadyScheduled = isScheduled.withLock { scheduled in
+            defer { scheduled = true }
+            return scheduled
+        }
+        guard !alreadyScheduled else { return }
+        Task { @MainActor [self] in
+            isScheduled.withLock { $0 = false }
+            session?.framebufferChanged()
+        }
+    }
+}

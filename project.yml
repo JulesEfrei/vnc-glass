@@ -1,0 +1,31 @@
+name: VNCGlass
+options:
+  bundleIdPrefix: com.julesefrei
+  deploymentTarget:
+    macOS: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+packages:
+  SessionCore:
+    path: Packages/SessionCore
+targets:
+  VNCGlass:
+    type: application
+    # Multiplatform target; add iOS here when the iPadOS app starts.
+    supportedDestinations: [macOS]
+    sources: [App]
+    dependencies:
+      - package: SessionCore
+    settings:
+      base:
+        PRODUCT_NAME: VNC Glass
+        PRODUCT_BUNDLE_IDENTIFIER: com.julesefrei.vncglass
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: VNC Glass
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
+        # Developer ID distribution outside the sandbox (ADR-0001).
+        ENABLE_HARDENED_RUNTIME: YES
+        ENABLE_APP_SANDBOX: NO
