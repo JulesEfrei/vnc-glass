@@ -17,6 +17,7 @@ struct VNCGlassApp: App {
             }
         }
         .defaultSize(width: 1280, height: 800)
+        .windowToolbarStyle(.unifiedCompact)
 
         Settings {
             SettingsView()
