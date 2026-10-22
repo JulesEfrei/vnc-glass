@@ -25,6 +25,7 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: VNC Glass
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
         # Developer ID distribution outside the sandbox (ADR-0001).
         ENABLE_HARDENED_RUNTIME: YES
