@@ -2,6 +2,7 @@ import CoreGraphics
 import Foundation
 import Network
 import Observation
+import os
 import RoyalVNCKit
 import Synchronization
 
@@ -488,6 +489,7 @@ public final class Session {
 private final class LinkDelegate: NSObject, VNCConnectionDelegate, Sendable {
     nonisolated(unsafe) weak var session: Session?
     private let isScheduled = Mutex(false)
+    private static let logger = Logger(subsystem: "com.julesefrei.vncglass", category: "Session")
 
     init(session: Session) {
         self.session = session
@@ -496,6 +498,10 @@ private final class LinkDelegate: NSObject, VNCConnectionDelegate, Sendable {
     func connection(_ connection: VNCConnection, stateDidChange connectionState: VNCConnection.ConnectionState) {
         let status = connectionState.status
         let failure = connectionState.error.flatMap(Session.Failure.init)
+        if status == .disconnected {
+            // The raw error, since Failure keeps only what the user is told.
+            Self.logger.notice("Link to \(connection.settings.hostname, privacy: .public):\(connection.settings.port) ended: \(String(describing: connectionState.error), privacy: .public)")
+        }
         Task { @MainActor [self] in session?.linkStatusChanged(status, failure: failure) }
     }
 

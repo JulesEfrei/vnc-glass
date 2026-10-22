@@ -167,6 +167,26 @@ struct SessionTests {
         try await eventually { session.image != nil }
     }
 
+    /// Each screen update makes the client ask for the next one while input is going out; both must share one ordered
+    /// stream of frames, or the server's MAC check fails and it hangs up (as wayvnc did, seen as Reconnecting).
+    @Test func screenUpdatesDuringInputKeepTheEncryptedStreamInOrder() async throws {
+        let server = try FakeRFBServer(width: 64, height: 48, security: .rsaAES(.aes256))
+        defer { server.stop() }
+        let session = try await loggedInSession(to: server, knownServerKeys: freshDefaults())
+        let moves = 500
+
+        for i in 0..<moves {
+            // FramebufferUpdate, 1 rectangle at 0,0 sized 1x1, Raw encoding, one 32-bit pixel.
+            server.send([0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0] + [0, 0, 255, 0])
+            session.handle(.pointerMoved(x: Double(i % 64), y: Double(i / 64)))
+            await Task.yield()
+        }
+
+        try await eventually { pointerEvents(server).count == moves || session.state != .connected }
+        #expect(session.state == .connected)
+        #expect(pointerEvents(server).count == moves)
+    }
+
     @Test func aChangedServerKeyWaitsForTheUserToAcceptIt() async throws {
         let server = try FakeRFBServer(security: .rsaAES(.aes256))
         defer { server.stop() }

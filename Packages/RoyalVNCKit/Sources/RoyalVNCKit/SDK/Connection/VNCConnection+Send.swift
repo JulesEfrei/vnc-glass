@@ -21,7 +21,9 @@ extension VNCConnection {
 		}
 	}
 
-	func sendFramebufferUpdateRequest() async throws {
+	/// Queued like every other client message: the send loop must be the stream's only writer, or RSA-AES frames go out
+	/// of order and the server hangs up.
+	func sendFramebufferUpdateRequest() {
 		guard let framebuffer,
               !state.areContinuousUpdatesEnabled else {
             return
@@ -33,15 +35,18 @@ extension VNCConnection {
 											  size: framebuffer.size)
 
 		// Request next update
-		try await sendFramebufferUpdateRequest(incremental: incremental,
-											   region: fullFramebufferRegion)
+		enqueueClientToServerMessage(VNCProtocol.FramebufferUpdateRequest(incremental: incremental,
+																		  xPosition: fullFramebufferRegion.location.x,
+																		  yPosition: fullFramebufferRegion.location.y,
+																		  width: fullFramebufferRegion.size.width,
+																		  height: fullFramebufferRegion.size.height))
 
 		if !incremental {
 			state.incrementalUpdatesEnabled = true
 		}
 	}
 
-	func sendEnableContinuousUpdates() async throws {
+	func sendEnableContinuousUpdates() {
 		guard let framebuffer,
               state.areContinuousUpdatesSupported,
               !state.areContinuousUpdatesEnabled else {
@@ -51,8 +56,11 @@ extension VNCConnection {
 		let fullFramebufferRegion = VNCRegion(location: .zero,
 											  size: framebuffer.size)
 
-		try await sendEnableContinuousUpdates(enable: true,
-											  region: fullFramebufferRegion)
+		enqueueClientToServerMessage(VNCProtocol.EnableContinuousUpdates(enable: true,
+																		 xPosition: fullFramebufferRegion.x,
+																		 yPosition: fullFramebufferRegion.y,
+																		 width: fullFramebufferRegion.width,
+																		 height: fullFramebufferRegion.height))
 
 		state.areContinuousUpdatesEnabled = true
 	}
@@ -68,28 +76,6 @@ private extension VNCConnection {
 
 			return
 		}
-
-		try await sendMessage(message)
-	}
-
-	func sendFramebufferUpdateRequest(incremental: Bool,
-									  region: VNCRegion) async throws {
-		let framebufferUpdateRequest = VNCProtocol.FramebufferUpdateRequest(incremental: incremental,
-																			xPosition: region.location.x,
-																			yPosition: region.location.y,
-																			width: region.size.width,
-																			height: region.size.height)
-
-		try await sendMessage(framebufferUpdateRequest)
-	}
-
-	func sendEnableContinuousUpdates(enable: Bool,
-									 region: VNCRegion) async throws {
-		let message = VNCProtocol.EnableContinuousUpdates(enable: enable,
-														  xPosition: region.x,
-														  yPosition: region.y,
-														  width: region.width,
-														  height: region.height)
 
 		try await sendMessage(message)
 	}

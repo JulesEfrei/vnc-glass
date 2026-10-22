@@ -79,7 +79,7 @@ private extension VNCConnection {
 		try framebuffer.writeSurface()
 		*/
 
-		try await sendFramebufferUpdateRequest()
+		sendFramebufferUpdateRequest()
 	}
 
 	func handleSetColourMapEntriesMessage() async throws {
@@ -135,6 +135,6 @@ private extension VNCConnection {
 			logger.logDebug("Disabling Continuous Updates")
 		}
 
-		try await sendFramebufferUpdateRequest()
+		sendFramebufferUpdateRequest()
 	}
 }
