@@ -7,6 +7,9 @@ import Foundation
 @_implementationOnly import d3des
 
 struct VNCDESEncryption {
+	/// d3des keeps the key schedule in a global, so every deskey-then-des sequence holds this lock.
+	static let d3desLock = NSLock()
+
 	static func encrypt(data: Data,
 						key: String) -> Data? {
 		var data = data
@@ -70,12 +73,14 @@ private extension VNCDESEncryption {
 						paddedKeyBytes: UnsafeMutablePointer<UInt8>) {
 		let challengeSize = 16
 
-		deskey(paddedKeyBytes, EN0)
+		d3desLock.withLock {
+			deskey(paddedKeyBytes, EN0)
 
-		for challengeIdx in stride(from: 0, to: challengeSize, by: 8) {
-			let bytesAtOffset = dataBytes.advanced(by: challengeIdx)
+			for challengeIdx in stride(from: 0, to: challengeSize, by: 8) {
+				let bytesAtOffset = dataBytes.advanced(by: challengeIdx)
 
-			des(bytesAtOffset, bytesAtOffset)
+				des(bytesAtOffset, bytesAtOffset)
+			}
 		}
 	}
 }

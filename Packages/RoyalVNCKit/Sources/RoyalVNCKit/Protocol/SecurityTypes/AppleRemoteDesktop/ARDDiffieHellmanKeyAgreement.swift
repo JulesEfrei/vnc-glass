@@ -75,14 +75,9 @@ private extension VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement {
 			return nil
 		}
 
-		// Check key lengths of generated private and public DH keys
-		guard bigPrivKey.bytesCount == keyLength,
-			  bigPubKey.bytesCount == keyLength else {
-			return nil
-		}
-
-		guard let privKey = bigPrivKey.bigEndianData(),
-			  let pubKey = bigPubKey.bigEndianData() else {
+		// Keys with leading zero bytes are padded to the key length the server expects, not rejected.
+		guard let privKey = bigPrivKey.fixedWidthBigEndianData(length: keyLength),
+			  let pubKey = bigPubKey.fixedWidthBigEndianData(length: keyLength) else {
 			return nil
 		}
 

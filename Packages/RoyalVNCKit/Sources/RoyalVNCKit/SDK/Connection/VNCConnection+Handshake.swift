@@ -116,9 +116,8 @@ private extension VNCConnection {
 			chosenSecurityType = .ultraVNCMSLogonII
 		} else if supportedSecurityTypes.contains(.vnc) {
 			chosenSecurityType = .vnc
-		} else if supportedSecurityTypes.contains(.tight) {
-			chosenSecurityType = .tight
 		} else {
+			// Tight security is not implemented, so a server offering only it is reported as unsupported.
 			chosenSecurityType = .invalid
 		}
 

@@ -1,6 +1,6 @@
 import FakeRFBServer
 import Foundation
-import SessionCore
+@testable import SessionCore
 import Testing
 
 @MainActor
@@ -34,6 +34,76 @@ struct SessionTests {
         #expect(server.authenticationResponse == block + block)
     }
 
+    @Test func noLoginOutsideTailscaleWarnsTheUser() async throws {
+        let server = try FakeRFBServer(security: .none)
+        defer { server.stop() }
+
+        let session = try await connectedSession(to: server)
+
+        #expect(session.isUnauthenticatedOutsideTailscale)
+    }
+
+    @Test func aLoginDoesNotWarn() async throws {
+        let server = try FakeRFBServer(security: .vncPassword)
+        defer { server.stop() }
+        let session = Session(address: "127.0.0.1", port: server.port, password: "password")
+
+        session.connect()
+
+        try await eventually { session.state == .connected }
+        #expect(!session.isUnauthenticatedOutsideTailscale)
+    }
+
+    // Tests cannot reach a 100.x address, so the range itself is checked on its own.
+    @Test(arguments: [
+        ("100.64.0.1", true), ("100.101.102.103", true), ("100.127.255.255", true),
+        ("100.63.255.255", false), ("100.128.0.0", false), ("127.0.0.1", false), ("192.168.1.10", false),
+        ("desk.tailnet.ts.net", false), ("", false),
+    ])
+    func tailscaleAddressesAreThoseIn100_64Slash10(address: String, isTailscale: Bool) {
+        #expect(Session.isTailscaleAddress(address) == isTailscale)
+    }
+
+    @Test func logsInWithAppleRemoteDesktopAuthentication() async throws {
+        let server = try FakeRFBServer(security: .appleRemoteDesktop)
+        defer { server.stop() }
+        let session = Session(address: "127.0.0.1", port: server.port)
+
+        session.connect()
+        try await eventually { session.credentialRequest != nil }
+        #expect(session.credentialRequest == CredentialRequest(needsUsername: true))
+
+        session.submitCredentials(username: "jane", password: "secret")
+
+        try await eventually { session.state == .connected }
+        // Decrypted by the server: length-prefixed username, then password.
+        #expect(server.authenticationResponse == [4] + Array("jane".utf8) + [6] + Array("secret".utf8))
+    }
+
+    @Test func aSavedPasswordLogsInWithoutAsking() async throws {
+        let server = try FakeRFBServer(security: .vncPassword)
+        defer { server.stop() }
+        let session = Session(address: "127.0.0.1", port: server.port, username: "", password: "password")
+
+        session.connect()
+
+        try await eventually { session.state == .connected }
+        let block: [UInt8] = [0xFF, 0x97, 0x50, 0x2E, 0x94, 0x22, 0xF0, 0x89]
+        #expect(server.authenticationResponse == block + block)
+    }
+
+    @Test func aRejectedSavedPasswordIsAskedForOnTheNextConnect() async throws {
+        let server = try FakeRFBServer(security: .vncPassword, rejectsLogin: true)
+        defer { server.stop() }
+        let session = Session(address: "127.0.0.1", port: server.port, username: "", password: "stale")
+        session.connect()
+        try await eventually { session.state == .disconnected(.authenticationFailed) }
+
+        session.connect()
+
+        try await eventually { session.credentialRequest != nil }
+    }
+
     @Test func cancellingThePasswordPromptDisconnects() async throws {
         let server = try FakeRFBServer(security: .vncPassword)
         defer { server.stop() }
@@ -43,9 +113,7 @@ struct SessionTests {
         try await eventually { session.credentialRequest != nil }
         session.cancelCredentials()
 
-        try await eventually {
-            if case .disconnected = session.state { true } else { false }
-        }
+        try await eventually { session.state == .disconnected(nil) }
         #expect(session.credentialRequest == nil)
     }
 
@@ -209,6 +277,48 @@ struct SessionTests {
 
         try await eventually { pointerEvents(server).count == 1 }
         #expect(pointerEvents(server) == [.pointerEvent(buttonMask: 0, x: 0, y: 47)])
+    }
+
+    @Test func aRefusedConnectionSaysSo() async throws {
+        let server = try FakeRFBServer()
+        server.stop() // Nothing listens on the port any more.
+        let session = Session(address: "127.0.0.1", port: server.port)
+
+        session.connect()
+
+        try await eventually { session.state == .disconnected(.refused) }
+    }
+
+    @Test func anUnknownHostIsUnreachable() async throws {
+        let session = Session(address: "no-such-host.invalid", port: 5900)
+
+        session.connect()
+
+        try await eventually(timeout: .seconds(15)) { session.state == .disconnected(.unreachable) }
+    }
+
+    @Test func aRejectedLoginIsAnAuthenticationFailure() async throws {
+        let server = try FakeRFBServer(security: .vncPassword, rejectsLogin: true)
+        defer { server.stop() }
+        let session = Session(address: "127.0.0.1", port: server.port)
+
+        session.connect()
+        try await eventually { session.credentialRequest != nil }
+        session.submitCredentials(username: "", password: "wrong")
+
+        try await eventually { session.state == .disconnected(.authenticationFailed) }
+    }
+
+    // 19 is VeNCrypt, 16 Tight security, which RoyalVNCKit names but never implemented.
+    @Test(arguments: [19, 16] as [UInt8])
+    func aServerOfferingOnlyUnknownLoginsIsUnsupported(type: UInt8) async throws {
+        let server = try FakeRFBServer(security: .unsupported(type))
+        defer { server.stop() }
+        let session = Session(address: "127.0.0.1", port: server.port)
+
+        session.connect()
+
+        try await eventually { session.state == .disconnected(.unsupportedSecurityType) }
     }
 
     @Test func serverDroppingTheConnectionDisconnectsTheSession() async throws {

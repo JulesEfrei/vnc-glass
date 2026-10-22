@@ -16,3 +16,8 @@ Changes from upstream:
   `RFBStream`, which wraps the network connection and encrypts both directions after the key exchange. The delegate
   gains `connection(_:shouldTrustServerKey:completion:)`, `VNCAuthenticationType` gains `.rsaAES`, and the C SDK
   refuses unknown server keys. A `RoyalVNCKitTests` target holds the cipher's fixed vectors.
+- Tight security (16) is no longer chosen when offered: it was never implemented, so a server offering only it now
+  fails as an unsupported security type (#3).
+- d3des keeps its key schedule in a global, so `VNCDESEncryption.d3desLock` serializes every DES use; two Sessions
+  logging in at once could otherwise encrypt with each other's password (#3).
+- ARD: DH keys with a leading zero byte are padded to the key length instead of failing the login (about 1 in 128, #3).

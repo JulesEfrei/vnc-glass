@@ -141,12 +141,14 @@ private extension VNCProtocol.UltraVNCMSLogonIIAuthentication.Authentication {
 						   key: UnsafeMutablePointer<UInt8>,
 						   source: UnsafeMutablePointer<UInt8>,
 						   sourceLength: Int) {
-		deskey(key, EN0)
+		VNCDESEncryption.d3desLock.withLock {
+			deskey(key, EN0)
 
-		let eightByteBlocks = sourceLength / 8
+			let eightByteBlocks = sourceLength / 8
 
-		for idx in 0..<eightByteBlocks {
-			des(source + idx * 8, target + idx * 8)
+			for idx in 0..<eightByteBlocks {
+				des(source + idx * 8, target + idx * 8)
+			}
 		}
 	}
 }

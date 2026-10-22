@@ -3,8 +3,8 @@ import Foundation
 import Security
 import Synchronization
 
-/// A minimal RFB 3.8 server on localhost for tests: security type None, VNC password or RSA-AES, records every client
-/// message, and sends server messages or drops the connection on demand.
+/// A minimal RFB 3.8 server on localhost for tests: security type None, VNC password, Apple Remote Desktop or RSA-AES,
+/// records every client message, and sends server messages or drops the connection on demand.
 /// It serves one client at a time and accepts the next one once the current client is gone.
 /// Call `stop()` when done: the accept thread keeps the server alive until then.
 public final class FakeRFBServer: Sendable {
@@ -23,9 +23,14 @@ public final class FakeRFBServer: Sendable {
         case none
         /// VNC authentication with an all-zero challenge. Any response is accepted and recorded.
         case vncPassword
+        /// Apple Remote Desktop's Diffie-Hellman login (type 30) over a 1024-bit group. Any credentials are accepted
+        /// and recorded.
+        case appleRemoteDesktop
         /// rfbproto RSA-AES with a 2048-bit server key: after the key exchange every byte in both directions travels
         /// in AES-EAX frames. Any credentials are accepted and recorded.
         case rsaAES(RSAAESType, passwordOnly: Bool = false)
+        /// Offers only this security type, one the client is expected not to support.
+        case unsupported(UInt8)
     }
 
     public enum RSAAESType: UInt8, Sendable {
@@ -39,6 +44,8 @@ public final class FakeRFBServer: Sendable {
     public let security: Security
     public let width: UInt16
     public let height: UInt16
+    /// Answers every login with a failed SecurityResult.
+    public let rejectsLogin: Bool
     /// Encodings the server claims to support. When the client's SetEncodings lists one of them,
     /// the server answers with an empty pseudo-encoding rectangle for it, which is only a valid
     /// announcement for encodings without a payload, such as QEMU Extended Key Event (-258).
@@ -50,9 +57,10 @@ public final class FakeRFBServer: Sendable {
     private let response = Mutex<[UInt8]?>(nil)
     private let serverKey: Mutex<SecKey?>
 
-    public init(width: UInt16 = 64, height: UInt16 = 48, security: Security = .none,
+    public init(width: UInt16 = 64, height: UInt16 = 48, security: Security = .none, rejectsLogin: Bool = false,
                 advertisedEncodings: [Int32] = []) throws {
         self.security = security
+        self.rejectsLogin = rejectsLogin
         self.width = width
         self.height = height
         self.advertisedEncodings = advertisedEncodings
@@ -151,11 +159,23 @@ public final class FakeRFBServer: Sendable {
             send([UInt8](repeating: 0, count: 16))
             guard let answer = reader.read(16) else { return }
             response.withLock { $0 = answer }
+        case .appleRemoteDesktop:
+            send([1, 30])
+            guard reader.read(1) != nil, let credentials = ardHandshake(&reader) else { return }
+            response.withLock { $0 = credentials }
         case .rsaAES(let type, let passwordOnly):
             send([1, type.rawValue])
             guard reader.read(1) != nil,
                   let credentials = rsaAESHandshake(&reader, type: type, passwordOnly: passwordOnly) else { return }
             response.withLock { $0 = credentials }
+        case .unsupported(let type):
+            send([1, type])
+            _ = reader.read(1)
+            return
+        }
+        if rejectsLogin {
+            let reason = Array("Authentication failed".utf8)
+            return send(be32(1) + be32(UInt32(reason.count)) + reason)
         }
         send(be32(0))
         guard reader.read(1) != nil else { return }
@@ -171,6 +191,27 @@ public final class FakeRFBServer: Sendable {
             }
             if case .unknown = message { return }
         }
+    }
+
+    /// The server side of the Apple Remote Desktop login. Returns the decrypted credentials as length-prefixed username
+    /// and password, or nil when the client breaks the protocol.
+    private func ardHandshake(_ reader: inout Reader) -> [UInt8]? {
+        let prime = CS.BigUInt(Data(hex: oakleyGroup2Prime))
+        let keyLength = 128
+        let privateKey = CS.BigUInt(Data((0..<127).map { _ in UInt8.random(in: .min ... .max) }))
+        let publicKey = Array(CS.BigUInt(2).power(privateKey, modulus: prime).serialize())
+        send([0, 2] + be16(UInt16(keyLength)) + Array(prime.serialize())
+             + [UInt8](repeating: 0, count: keyLength - publicKey.count) + publicKey)
+
+        guard let cipherText = reader.read(128), let clientKey = reader.read(keyLength) else { return nil }
+        // The client hashes the shared secret without leading zero bytes.
+        let secret = CS.BigUInt(Data(clientKey)).power(privateKey, modulus: prime).serialize()
+        guard let plaintext = try? AES(key: Array(secret.md5()), blockMode: ECB(), padding: .noPadding)
+            .decrypt(cipherText) else { return nil }
+        // Each field is a C string in its own 64 bytes, the rest random.
+        let username = plaintext[..<64].prefix { $0 != 0 }
+        let password = plaintext[64...].prefix { $0 != 0 }
+        return [UInt8(username.count)] + username + [UInt8(password.count)] + password
     }
 
     /// The server side of rfbproto's RSA-AES handshake. Returns the decrypted credentials message, or nil when the
@@ -398,3 +439,10 @@ private func be16(_ value: UInt16) -> [UInt8] { [UInt8(value >> 8), UInt8(value 
 private func be32(_ value: UInt32) -> [UInt8] { be16(UInt16(value >> 16)) + be16(UInt16(value & 0xFFFF)) }
 private func u16(_ bytes: [UInt8], _ at: Int) -> UInt16 { UInt16(bytes[at]) << 8 | UInt16(bytes[at + 1]) }
 private func u32(_ bytes: [UInt8], _ at: Int) -> UInt32 { UInt32(u16(bytes, at)) << 16 | UInt32(u16(bytes, at + 2)) }
+
+/// RFC 2409's 1024-bit MODP group.
+private let oakleyGroup2Prime = """
+FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DD\
+EF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7ED\
+EE386BFB5A899FA5AE9F24117C4B1FE649286651ECE65381FFFFFFFFFFFFFFFF
+"""

@@ -2,12 +2,14 @@ import SessionCore
 import SwiftUI
 
 struct SessionWindow: View {
-    let target: SessionTarget
+    let connection: Connection
     @State private var session: Session
+    @State private var isUnauthenticatedWarningDismissed = false
 
-    init(target: SessionTarget) {
-        self.target = target
-        _session = State(initialValue: Session(address: target.address, port: target.port))
+    init(connection: Connection, password: String?) {
+        self.connection = connection
+        _session = State(initialValue: Session(address: connection.address, port: connection.port,
+                                               username: connection.username, password: password))
     }
 
     var body: some View {
@@ -21,7 +23,14 @@ struct SessionWindow: View {
                         .glassEffect()
                 }
             }
-            .navigationTitle("\(target.address):\(target.port)")
+            .overlay(alignment: .top) {
+                if session.isUnauthenticatedOutsideTailscale && !isUnauthenticatedWarningDismissed {
+                    UnauthenticatedWarning(address: connection.address) { isUnauthenticatedWarningDismissed = true }
+                        .padding()
+                }
+            }
+            .navigationTitle(connection.name)
+            .navigationSubtitle("\(connection.address):\(connection.port)")
             .toolbar {
                 if session.state == .connected {
                     Button("Disconnect", systemImage: "xmark", action: session.disconnect)
@@ -33,7 +42,7 @@ struct SessionWindow: View {
                 get: { session.credentialRequest != nil },
                 set: { if !$0 { session.cancelCredentials() } }
             )) {
-                CredentialsForm(session: session, target: target)
+                CredentialsForm(session: session, address: connection.address)
             }
             .alert("The server's identity has changed", isPresented: Binding(
                 get: { session.serverKeyChange != nil },
@@ -43,7 +52,7 @@ struct SessionWindow: View {
                 Button("Trust New Key", role: .destructive, action: session.trustServerKey)
             } message: {
                 Text("""
-                \(target.address) sent a different key than last time. This happens when the server is \
+                \(connection.address) sent a different key than last time. This happens when the server is \
                 reinstalled or its key is replaced, but it can also mean someone is intercepting the connection.
 
                 New key: \(session.serverKeyChange?.fingerprint ?? "")
@@ -57,21 +66,62 @@ struct SessionWindow: View {
         switch session.state {
         case .connecting: "Connecting…"
         case .connected: nil
-        case .disconnected(let error): error.map { "Disconnected: \($0)" } ?? "Disconnected"
+        case .disconnected(nil): "Disconnected"
+        case .disconnected(.unreachable?):
+            "\(connection.address) could not be reached. Check the address and that the computer is online."
+        case .disconnected(.refused?):
+            "\(connection.address) refused to connect. Check the port and that its VNC server is running."
+        case .disconnected(.authenticationFailed?): "The username or password was not accepted."
+        case .disconnected(.unsupportedSecurityType?):
+            "The server only offers login methods VNC Glass does not support."
+        case .disconnected(.other(let message)?): "Disconnected: \(message)"
         }
     }
 }
 
-/// Asks for the login the server requires. Nothing is saved; Keychain storage comes with saved Connections.
+/// Tells the user that the server let them in without any login while not on a Tailscale address.
+private struct UnauthenticatedWarning: View {
+    let address: String
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Image(systemName: "exclamationmark.shield.fill")
+                .foregroundStyle(.yellow)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("This server asks for no login")
+                    .font(.headline)
+                Text("Anyone who can reach \(address) can control this computer, and the session is not encrypted.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            Button("Dismiss", systemImage: "xmark", action: dismiss)
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .frame(maxWidth: 520)
+        .glassEffect(in: .rect(cornerRadius: 16))
+    }
+}
+
+/// Asks for the login the server requires when the Connection has no saved password, or the saved one was rejected.
 private struct CredentialsForm: View {
     let session: Session
-    let target: SessionTarget
-    @State private var username = ""
+    let address: String
+    @State private var username: String
     @State private var password = ""
+
+    init(session: Session, address: String) {
+        self.session = session
+        self.address = address
+        _username = State(initialValue: session.username)
+    }
 
     var body: some View {
         Form {
-            Section("Log in to \(target.address)") {
+            Section("Log in to \(address)") {
                 if session.credentialRequest?.needsUsername == true {
                     TextField("Username", text: $username)
                         .textContentType(.username)

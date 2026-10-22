@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import Network
 import Observation
 import RoyalVNCKit
 import Synchronization
@@ -37,12 +38,25 @@ public final class Session {
     public enum State: Equatable, Sendable {
         case connecting
         case connected
-        case disconnected(error: String?)
+        /// Nil when the Session ended without a fault, as when the user disconnected or declined to log in.
+        case disconnected(Failure?)
+    }
+
+    public enum Failure: Equatable, Sendable {
+        /// The address did not resolve, or nothing answered at it.
+        case unreachable
+        /// The computer answered but nothing listens on the port.
+        case refused
+        /// The server did not accept the login.
+        case authenticationFailed
+        /// The server offers no login this app can perform.
+        case unsupportedSecurityType
+        case other(String)
     }
 
     public let address: String
     public let port: UInt16
-    public private(set) var state: State = .disconnected(error: nil)
+    public private(set) var state: State = .disconnected(nil)
     public private(set) var screenSize: ScreenSize?
     /// The latest picture of the remote screen.
     public private(set) var image: CGImage?
@@ -50,6 +64,9 @@ public final class Session {
     public private(set) var credentialRequest: CredentialRequest?
     /// Set while the Session waits for the user to accept or refuse a changed server key.
     public private(set) var serverKeyChange: ServerKeyChange?
+    /// The server let the Session in without any login (security type None) and the address is not a Tailscale one, so
+    /// anyone who can reach the server can control it.
+    public private(set) var isUnauthenticatedOutsideTailscale = false
 
     @ObservationIgnored private var link: VNCConnection?
     @ObservationIgnored private var linkDelegate: LinkDelegate?
@@ -57,10 +74,18 @@ public final class Session {
     @ObservationIgnored private var serverKeyReply: ServerKeyReply?
     /// Remembers each server's key fingerprint by address and port, trusting the first one seen.
     @ObservationIgnored private let knownServerKeys: UserDefaults
+    /// The username given to servers that ask for one, and prefilled in the prompt.
+    public let username: String
+    /// Answers the server's login without asking. Dropped once the server rejects it, so the user is asked instead.
+    @ObservationIgnored private var savedPassword: String?
+    @ObservationIgnored private var wasAskedForCredentials = false
 
-    public init(address: String, port: UInt16, knownServerKeys: UserDefaults = .standard) {
+    public init(address: String, port: UInt16, username: String = "", password: String? = nil,
+                knownServerKeys: UserDefaults = .standard) {
         self.address = address
         self.port = port
+        self.username = username
+        savedPassword = password
         self.knownServerKeys = knownServerKeys
     }
 
@@ -84,6 +109,8 @@ public final class Session {
         self.link = link
         self.linkDelegate = linkDelegate
         state = .connecting
+        wasAskedForCredentials = false
+        isUnauthenticatedOutsideTailscale = false
         link.connect()
     }
 
@@ -167,16 +194,20 @@ public final class Session {
         return (UInt16(min(max(x, 0), maxX)), UInt16(min(max(y, 0), maxY)))
     }
 
-    fileprivate func linkStatusChanged(_ status: VNCConnection.Status, error: String?) {
+    fileprivate func linkStatusChanged(_ status: VNCConnection.Status, failure: Failure?) {
         switch status {
         case .connecting: state = .connecting
-        case .connected: state = .connected
+        case .connected:
+            // Every login RoyalVNCKit performs asks for credentials, so connecting without being asked means None.
+            isUnauthenticatedOutsideTailscale = !wasAskedForCredentials && !Self.isTailscaleAddress(address)
+            state = .connected
         case .disconnected:
             credentialReply = nil
             credentialRequest = nil
             serverKeyReply = nil
             serverKeyChange = nil
-            state = .disconnected(error: error)
+            if failure == .authenticationFailed { savedPassword = nil }
+            state = .disconnected(failure)
         case .disconnecting: break
         }
     }
@@ -184,6 +215,8 @@ public final class Session {
     fileprivate func credentialsRequested(_ request: CredentialRequest, reply: CredentialReply) {
         credentialRequest = request
         credentialReply = reply
+        wasAskedForCredentials = true
+        if let savedPassword { submitCredentials(username: username, password: savedPassword) }
     }
 
     fileprivate func serverKeyPresented(_ reply: ServerKeyReply) {
@@ -198,6 +231,14 @@ public final class Session {
             serverKeyChange = ServerKeyChange(fingerprint: "SHA256:\(base64)")
             serverKeyReply = reply
         }
+    }
+
+    /// Whether the address is an IPv4 literal in Tailscale's 100.64.0.0/10.
+    /// shortcut: hostnames are not resolved, so a MagicDNS name still warns; resolve them if that proves noisy.
+    static func isTailscaleAddress(_ address: String) -> Bool {
+        var ip = in_addr()
+        guard inet_pton(AF_INET, address, &ip) == 1 else { return false }
+        return UInt32(bigEndian: ip.s_addr) & 0xFFC0_0000 == 0x6440_0000
     }
 
     fileprivate func framebufferChanged() {
@@ -218,8 +259,8 @@ private final class LinkDelegate: NSObject, VNCConnectionDelegate, Sendable {
 
     func connection(_ connection: VNCConnection, stateDidChange connectionState: VNCConnection.ConnectionState) {
         let status = connectionState.status
-        let error = connectionState.error.map { ($0 as NSError).localizedDescription }
-        Task { @MainActor [weak session] in session?.linkStatusChanged(status, error: error) }
+        let failure = connectionState.error.flatMap(Session.Failure.init)
+        Task { @MainActor [weak session] in session?.linkStatusChanged(status, failure: failure) }
     }
 
     func connection(_ connection: VNCConnection,
@@ -283,4 +324,31 @@ private struct CredentialReply: @unchecked Sendable {
 private struct ServerKeyReply: @unchecked Sendable {
     let fingerprint: Data
     let send: (Bool) -> Void
+}
+
+extension Session.Failure {
+    /// Sorts RoyalVNCKit's error into the kinds the user is told apart. Nil for endings the user chose.
+    init?(_ error: Error) {
+        switch error {
+        case VNCError.authentication(.noAuthenticationDataProvided), VNCError.authentication(.serverKeyNotTrusted):
+            return nil
+        case VNCError.authentication(.clientCouldNotDecideOnSecurityType):
+            self = .unsupportedSecurityType
+        case VNCError.authentication(.securityHandshakingFailed), VNCError.authentication(.ardAuthenticationFailed),
+             VNCError.authentication(.rsaAESAuthenticationFailed), VNCError.authentication(.ultraVNCMSLogonIIAuthenticationFailed):
+            self = .authenticationFailed
+        case VNCError.connection(.failed(let underlying as NWError)):
+            switch underlying {
+            case .posix(.ECONNREFUSED):
+                self = .refused
+            case .dns, .posix(.EHOSTUNREACH), .posix(.ENETUNREACH), .posix(.EHOSTDOWN), .posix(.ENETDOWN),
+                 .posix(.ETIMEDOUT):
+                self = .unreachable
+            default:
+                self = .other(error.localizedDescription)
+            }
+        default:
+            self = .other(error.localizedDescription)
+        }
+    }
 }
