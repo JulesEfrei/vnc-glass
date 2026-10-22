@@ -103,20 +103,13 @@ private extension VNCConnection {
 		let serverCutText = try await VNCProtocol.ServerCutText.receive(connection: connection,
 																		logger: logger)
 
-		let text = serverCutText.text
-
 		logger.logDebug("Received Clipboard Text from Server")
 
-		// Extended Clipboard is never announced, so an extended message carries no text for us.
-		guard serverCutText.extended == nil else { return }
-
-		guard settings.isClipboardRedirectionEnabled else {
-			notifyDelegateAboutClipboardText(text)
-
-			return
+		if let extended = serverCutText.extended {
+			handleExtendedClipboardMessage(extended)
+		} else {
+			receivedClipboardText(serverCutText.text)
 		}
-
-		clipboard.text = text
 	}
 
 	func handleBellMessage() async throws {

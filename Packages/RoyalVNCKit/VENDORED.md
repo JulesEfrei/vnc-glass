@@ -27,6 +27,15 @@ Changes from upstream:
   server (wayvnc #461).
 - Clipboard (#6): with clipboard redirection off, ServerCutText goes to the new delegate method
   `connection(_:didReceiveClipboardText:)` instead of being dropped, and `sendClipboardText(_:)` sends ClientCutText.
-  ClientCutText replaces characters Latin-1 lacks with `?` instead of sending an empty clipboard. Extended Clipboard
-  ServerCutText, never announced, is ignored rather than written to the pasteboard as empty text. The C SDK drops
+  ClientCutText replaces characters Latin-1 lacks with `?` instead of sending an empty clipboard. The C SDK drops
   the server's clipboard when redirection is off.
+- Extended Clipboard (#7): the client announces pseudo-encoding 0xC0A1E5CE and answers the server's caps with its
+  own (text only, every change as a notify). `ExtendedClipboard` replaces the unfinished `ExtendedServerCutText`.
+  Once the server's caps take text, `sendClipboardText(_:)` notifies and provides on request in UTF-8, re-notifying
+  text sent as Latin-1 before the caps arrived; a server notify is answered with a request and its provide goes to
+  the delegate. The clipboard monitor (redirection on) goes through `sendClipboardText(_:)` too. Messages over 20 MiB
+  end the connection; provided text that inflates past it is dropped
+  (`ZlibStream.decompressedData(compressedData:maximumLength:)`). `ProtocolError.unexpectedExtendedServerCutTextAction`
+  is gone with the parser that threw it.
+- The send queue locks: the API, the receive loop (clipboard replies) and the send loop all touch it from different
+  threads, which upstream's plain array did not survive.

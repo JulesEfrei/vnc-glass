@@ -103,8 +103,10 @@ public final class Session {
     @ObservationIgnored private var shortcutKeys: [KeyCode] = []
     /// The Unlock Shortcut has fired and the rest of its keys are still being released.
     @ObservationIgnored private var isShortcutFired = false
-    /// The local clipboard text last sent, until the remote clipboard changes, so the server's echo of it is ignored.
-    @ObservationIgnored private var sentClipboardText: String?
+    /// The local clipboard text last sent, until the remote clipboard changes, so the server's echo of it is ignored:
+    /// the text itself and with LF line endings over Extended Clipboard, and with `?` for what Latin-1 lacks over plain
+    /// cut text.
+    @ObservationIgnored private var sentClipboardTexts: Set<String> = []
 
     public init(address: String, port: UInt16, username: String = "", password: String? = nil,
                 keyboardProfile: KeyboardProfile = .default, knownServerKeys: UserDefaults = .standard) {
@@ -218,12 +220,11 @@ public final class Session {
     public func localClipboardChanged(text: String?, types: [String]) {
         guard let link, state == .connected, text == nil || text != remoteClipboardText else { return }
         remoteClipboardText = nil
-        sentClipboardText = nil
+        sentClipboardTexts = []
         // nspasteboard.org markers: password managers flag secrets as concealed, and transient items are not meant to persist.
         guard let text, !types.contains(where: Self.privateClipboardTypes.contains) else { return }
-        // As the server receives it, with `?` for what Latin-1 lacks, so its echo is recognized.
-        sentClipboardText = text.data(using: .isoLatin1, allowLossyConversion: true)
-            .flatMap { String(data: $0, encoding: .isoLatin1) }
+        let latin1 = text.data(using: .isoLatin1, allowLossyConversion: true).flatMap { String(data: $0, encoding: .isoLatin1) }
+        sentClipboardTexts = Set([text, text.replacingOccurrences(of: "\r\n", with: "\n"), latin1].compactMap(\.self))
         link.sendClipboardText(text)
     }
 
@@ -331,7 +332,7 @@ public final class Session {
             isShortcutFired = false
             lockMode = .unlocked
             remoteClipboardText = nil
-            sentClipboardText = nil
+            sentClipboardTexts = []
             if failure == .authenticationFailed { savedPassword = nil }
             state = .disconnected(failure)
         case .disconnecting: break
@@ -368,8 +369,8 @@ public final class Session {
     }
 
     fileprivate func remoteClipboardChanged(_ text: String) {
-        guard text != sentClipboardText else { return }
-        sentClipboardText = nil
+        guard !sentClipboardTexts.contains(text) else { return }
+        sentClipboardTexts = []
         remoteClipboardText = text
     }
 

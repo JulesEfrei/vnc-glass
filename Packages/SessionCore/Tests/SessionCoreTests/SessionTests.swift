@@ -656,6 +656,98 @@ struct SessionTests {
         #expect(cutTexts(server).isEmpty)
     }
 
+    @Test func withExtendedClipboardLocalTextWithEmojiArrivesIntact() async throws {
+        let server = try FakeRFBServer(advertisedEncodings: [FakeRFBServer.extendedClipboardEncoding])
+        defer { server.stop() }
+        let session = try await extendedClipboardSession(to: server)
+
+        session.localClipboardChanged(text: "café 😀\nok", types: ["public.utf8-plain-text"])
+
+        try await eventually { !providedTexts(server).isEmpty }
+        #expect(providedTexts(server) == [Array("café 😀\r\nok".utf8) + [0]])
+        #expect(cutTexts(server).isEmpty)
+    }
+
+    @Test func withExtendedClipboardServerTextWithEmojiArrivesIntact() async throws {
+        let server = try FakeRFBServer(advertisedEncodings: [FakeRFBServer.extendedClipboardEncoding])
+        defer { server.stop() }
+        let session = try await extendedClipboardSession(to: server)
+
+        server.sendClipboardText("naïve 🎉\nline")
+
+        try await eventually { session.remoteClipboardText == "naïve 🎉\nline" }
+    }
+
+    @Test func withoutExtendedClipboardTextGoesAsLatin1() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+
+        session.localClipboardChanged(text: "café → ok", types: ["public.utf8-plain-text"])
+
+        try await eventually { !cutTexts(server).isEmpty }
+        #expect(cutTexts(server) == [.clientCutText(Array("caf".utf8) + [0xE9] + Array(" ? ok".utf8))])
+        #expect(!server.messages.contains { if case .extendedClientCutText = $0 { true } else { false } })
+    }
+
+    @Test(arguments: ["org.nspasteboard.ConcealedType", "org.nspasteboard.TransientType"])
+    func withExtendedClipboardConcealedAndTransientItemsAreNeverSent(marker: String) async throws {
+        let server = try FakeRFBServer(advertisedEncodings: [FakeRFBServer.extendedClipboardEncoding])
+        defer { server.stop() }
+        let session = try await extendedClipboardSession(to: server)
+
+        session.localClipboardChanged(text: "hunter2 🔑", types: ["public.utf8-plain-text", marker])
+        session.localClipboardChanged(text: "ok 👍", types: ["public.utf8-plain-text"])
+
+        try await eventually { !providedTexts(server).isEmpty }
+        #expect(providedTexts(server) == [Array("ok 👍".utf8) + [0]])
+    }
+
+    @Test func withExtendedClipboardTextJustReceivedIsNotSentBack() async throws {
+        let server = try FakeRFBServer(advertisedEncodings: [FakeRFBServer.extendedClipboardEncoding])
+        defer { server.stop() }
+        let session = try await extendedClipboardSession(to: server)
+        server.sendClipboardText("from remote 🎉")
+        try await eventually { session.remoteClipboardText == "from remote 🎉" }
+
+        session.localClipboardChanged(text: "from remote 🎉", types: ["public.utf8-plain-text"])
+        session.localClipboardChanged(text: "from mac 🍎", types: ["public.utf8-plain-text"])
+
+        try await eventually { !providedTexts(server).isEmpty }
+        #expect(providedTexts(server) == [Array("from mac 🍎".utf8) + [0]])
+    }
+
+    @Test func withExtendedClipboardTextTheRemoteEchoesBackIsNotWrittenToTheMac() async throws {
+        let server = try FakeRFBServer(advertisedEncodings: [FakeRFBServer.extendedClipboardEncoding])
+        defer { server.stop() }
+        let session = try await extendedClipboardSession(to: server)
+        session.localClipboardChanged(text: "from mac 🍎\nline", types: ["public.utf8-plain-text"])
+        try await eventually { !providedTexts(server).isEmpty }
+
+        server.sendClipboardText("from mac 🍎\nline")
+        // The server provides once the client requests, and the Session reads in order.
+        try await eventually { requestCount(server) == 1 }
+        server.send(screenUpdate)
+        try await eventually { session.image != nil }
+
+        #expect(session.remoteClipboardText == nil)
+    }
+
+    @Test func withExtendedClipboardAnEchoOfCRLFTextIsRecognized() async throws {
+        let server = try FakeRFBServer(advertisedEncodings: [FakeRFBServer.extendedClipboardEncoding])
+        defer { server.stop() }
+        let session = try await extendedClipboardSession(to: server)
+        session.localClipboardChanged(text: "a\r\nb", types: ["public.utf8-plain-text"])
+        try await eventually { !providedTexts(server).isEmpty }
+
+        server.sendClipboardText("a\nb") // the echo, which comes back with LF line endings
+        try await eventually { requestCount(server) == 1 }
+        server.send(screenUpdate)
+        try await eventually { session.image != nil }
+
+        #expect(session.remoteClipboardText == nil)
+    }
+
     @Test func aRefusedConnectionSaysSo() async throws {
         let server = try FakeRFBServer()
         server.stop() // Nothing listens on the port any more.
@@ -784,6 +876,31 @@ func eventually(timeout: Duration = .seconds(5), _ condition: () -> Bool) async 
         }
         try await Task.sleep(for: .milliseconds(10))
     }
+}
+
+/// Connects and waits for the client's Extended Clipboard caps, its answer to the server's.
+@MainActor
+private func extendedClipboardSession(to server: FakeRFBServer) async throws -> Session {
+    let session = try await connectedSession(to: server)
+    try await eventually {
+        server.messages.contains {
+            if case .extendedClientCutText(let flags, _) = $0 { flags & FakeRFBServer.ClipboardFlag.caps != 0 } else { false }
+        }
+    }
+    return session
+}
+
+private func requestCount(_ server: FakeRFBServer) -> Int {
+    server.messages.count {
+        if case .extendedClientCutText(let flags, _) = $0 {
+            flags == FakeRFBServer.ClipboardFlag.request | FakeRFBServer.ClipboardFlag.text
+        } else { false }
+    }
+}
+
+/// The text of every Extended Clipboard provide the client sent.
+private func providedTexts(_ server: FakeRFBServer) -> [[UInt8]] {
+    server.messages.compactMap { if case .extendedClientCutText(_, let text?) = $0 { text } else { nil } }
 }
 
 /// ServerCutText: type 3, 3 bytes of padding, the length, then the Latin-1 text.

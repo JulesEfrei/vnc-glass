@@ -36,7 +36,9 @@ extension ZlibStream {
 		try stream.inflateReset()
 	}
 
-    func decompressedData(compressedData: Data) throws -> Data {
+	/// Inflates until the input runs out. Throws once the output passes `maximumLength`, so a small payload cannot
+	/// claim unbounded memory.
+    func decompressedData(compressedData: Data, maximumLength: Int = .max) throws -> Data {
 		let stream = self.stream
 		let flush = ZlibFlush.noFlush
 
@@ -90,6 +92,10 @@ extension ZlibStream {
 						if actualOut > 0 {
 							decompressedData.append(buffer,
 													count: .init(actualOut))
+						}
+
+						if decompressedData.count > maximumLength {
+							throw ZlibStreamError.decompressedDataOverflow
 						}
 					}
 				} catch {

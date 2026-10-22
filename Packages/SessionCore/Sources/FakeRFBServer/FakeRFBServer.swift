@@ -15,6 +15,9 @@ public final class FakeRFBServer: Sendable {
         case keyEvent(down: Bool, keysym: UInt32)
         case pointerEvent(buttonMask: UInt8, x: UInt16, y: UInt16)
         case clientCutText([UInt8])
+        /// Extended Clipboard: client message 6 with a negative length. `text` is a provide's text as sent: UTF-8 with
+        /// CRLF line endings and a terminating null.
+        case extendedClientCutText(flags: UInt32, text: [UInt8]?)
         /// QEMU Extended Key Event: the keysym and the XT keycode, with E0-prefixed keys as 0x80 | low byte.
         case qemuKeyEvent(down: Bool, keysym: UInt32, keycode: UInt32)
         /// A message type the server cannot parse yet. Its length is unknown, so the server drops the client.
@@ -34,6 +37,20 @@ public final class FakeRFBServer: Sendable {
         /// Offers only this security type, one the client is expected not to support.
         case unsupported(UInt8)
     }
+
+    /// Extended Clipboard flags: the text format and the actions.
+    public enum ClipboardFlag {
+        public static let text: UInt32 = 1
+        public static let caps: UInt32 = 1 << 24
+        public static let request: UInt32 = 1 << 25
+        public static let peek: UInt32 = 1 << 26
+        public static let notify: UInt32 = 1 << 27
+        public static let provide: UInt32 = 1 << 28
+    }
+
+    /// Advertise this to offer Extended Clipboard: the server then answers SetEncodings with its caps instead of a
+    /// rectangle, asks for text the client notifies, and provides its own when asked.
+    public static let extendedClipboardEncoding = Int32(bitPattern: 0xC0A1_E5CE)
 
     public enum RSAAESType: UInt8, Sendable {
         /// SHA-1 and AES-128, 16-byte randoms.
@@ -58,6 +75,8 @@ public final class FakeRFBServer: Sendable {
     private let recorded = Mutex<[ClientMessage]>([])
     private let response = Mutex<[UInt8]?>(nil)
     private let serverKey: Mutex<SecKey?>
+    /// The server's clipboard text, provided when the client asks for it.
+    private let clipboardText = Mutex<String?>(nil)
 
     public init(width: UInt16 = 64, height: UInt16 = 48, security: Security = .none, rejectsLogin: Bool = false,
                 advertisedEncodings: [Int32] = []) throws {
@@ -116,6 +135,13 @@ public final class FakeRFBServer: Sendable {
             guard client != nil else { return }
             client!.write(bytes)
         }
+    }
+
+    /// Changes the server's clipboard and notifies the client, over Extended Clipboard. Call it once the client has
+    /// sent its caps.
+    public func sendClipboardText(_ text: String) {
+        clipboardText.withLock { $0 = text }
+        sendExtendedClipboard(flags: ClipboardFlag.notify | ClipboardFlag.text)
     }
 
     /// Closes the current client connection without any protocol goodbye.
@@ -187,12 +213,38 @@ public final class FakeRFBServer: Sendable {
         send(be16(width) + be16(height) + pixelFormat + be32(UInt32(name.count)) + name)
 
         while let message = readMessage(&reader) {
+            // Answered before being recorded, so a test that sees the message also sees the answer sent.
+            answer(message)
             recorded.withLock { $0.append(message) }
-            if case .setEncodings(let requested) = message {
-                announce(advertisedEncodings.filter(requested.contains))
-            }
             if case .unknown = message { return }
         }
+    }
+
+    private func answer(_ message: ClientMessage) {
+        switch message {
+        case .setEncodings(let requested):
+            let confirmed = advertisedEncodings.filter(requested.contains)
+            announce(confirmed.filter { $0 != Self.extendedClipboardEncoding })
+            if confirmed.contains(Self.extendedClipboardEncoding) {
+                // Caps: text and every action, with no unsolicited text (size 0), as rfbproto recommends.
+                sendExtendedClipboard(flags: ClipboardFlag.caps | ClipboardFlag.request | ClipboardFlag.peek
+                                      | ClipboardFlag.notify | ClipboardFlag.provide | ClipboardFlag.text, be32(0))
+            }
+        case .extendedClientCutText(let flags, _) where flags == ClipboardFlag.notify | ClipboardFlag.text:
+            sendExtendedClipboard(flags: ClipboardFlag.request | ClipboardFlag.text)
+        case .extendedClientCutText(let flags, _) where flags == ClipboardFlag.request | ClipboardFlag.text:
+            guard let text = clipboardText.withLock({ $0 }) else { return }
+            let bytes = Array(text.replacingOccurrences(of: "\n", with: "\r\n").utf8) + [0]
+            sendExtendedClipboard(flags: ClipboardFlag.provide | ClipboardFlag.text,
+                                  zlibCompress(be32(UInt32(bytes.count)) + bytes))
+        default:
+            break
+        }
+    }
+
+    /// ServerCutText with a negative length: the flags, then the payload.
+    private func sendExtendedClipboard(flags: UInt32, _ payload: [UInt8] = []) {
+        send([3, 0, 0, 0] + be32(UInt32(bitPattern: -Int32(4 + payload.count))) + be32(flags) + payload)
     }
 
     /// The server side of the Apple Remote Desktop login. Returns the decrypted credentials as length-prefixed username
@@ -289,8 +341,17 @@ public final class FakeRFBServer: Sendable {
             guard let body = reader.read(5) else { return nil }
             return .pointerEvent(buttonMask: body[0], x: u16(body, 1), y: u16(body, 3))
         case 6:
-            guard let header = reader.read(7), let text = reader.read(Int(u32(header, 3))) else { return nil }
-            return .clientCutText(text)
+            guard let header = reader.read(7) else { return nil }
+            let length = Int32(bitPattern: u32(header, 3))
+            guard length < 0 else { return reader.read(Int(length)).map(ClientMessage.clientCutText) }
+            guard let body = reader.read(Int(length.magnitude)), body.count >= 4 else { return nil }
+            let flags = u32(body, 0)
+            guard flags & (ClipboardFlag.caps | ClipboardFlag.provide) == ClipboardFlag.provide else {
+                return .extendedClientCutText(flags: flags, text: nil)
+            }
+            guard let plain = zlibDecompress(Array(body[4...])), plain.count >= 4,
+                  plain.count >= 4 + Int(u32(plain, 0)) else { return .unknown(type: type) }
+            return .extendedClientCutText(flags: flags, text: Array(plain[4..<4 + Int(u32(plain, 0))]))
         case 255:
             guard let body = reader.read(11), body[0] == 0 else { return .unknown(type: type) }
             return .qemuKeyEvent(down: u16(body, 1) != 0, keysym: u32(body, 3), keycode: u32(body, 7))
@@ -363,6 +424,31 @@ private struct FrameCipher {
         let mac = zip(zip(nonceMAC, omac(1, header)), omac(2, ciphertext)).map { $0.0 ^ $0.1 ^ $1 }
         return (output, mac)
     }
+}
+
+/// A zlib stream (RFC 1950) around Apple's raw DEFLATE, so the server shares no zlib code with the client.
+private func zlibCompress(_ bytes: [UInt8]) -> [UInt8] {
+    let deflated = try! (Data(bytes) as NSData).compressed(using: .zlib) as Data
+    return [0x78, 0x9C] + deflated + be32(adler32(bytes))
+}
+
+/// Nil unless `bytes` is one complete zlib stream with a matching checksum.
+private func zlibDecompress(_ bytes: [UInt8]) -> [UInt8]? {
+    guard bytes.count > 6,
+          let inflated = try? (Data(bytes[2..<(bytes.count - 4)]) as NSData).decompressed(using: .zlib) as Data
+    else { return nil }
+    let plain = Array(inflated)
+    return be32(adler32(plain)) == Array(bytes.suffix(4)) ? plain : nil
+}
+
+private func adler32(_ bytes: [UInt8]) -> UInt32 {
+    var a: UInt32 = 1
+    var b: UInt32 = 0
+    for byte in bytes {
+        a = (a + UInt32(byte)) % 65521
+        b = (b + a) % 65521
+    }
+    return b << 16 | a
 }
 
 private func newRSAKey() throws -> SecKey {

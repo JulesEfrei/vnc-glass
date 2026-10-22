@@ -25,8 +25,6 @@ public extension VNCError {
 		case zrlePaletteIndexOverflow(paletteIndex: Int, paletteSize: UInt8)
 		case zrlePaletteRLELengthOverflow
 		case zrleUnexpectedRLEStreamEnd
-		case unexpectedExtendedServerCutTextAction(action: UInt32)
-
 		// MARK: - LocalizedError
 		public var errorDescription: String? {
 			// TODO: Localize
@@ -71,8 +69,6 @@ public extension VNCError {
 					return "An invalid ZRLE RLE length was encountered."
 				case .zrleUnexpectedRLEStreamEnd:
 					return "End of stream reached while reading ZRLE RLE run-length."
-				case .unexpectedExtendedServerCutTextAction(let action):
-					return "An unexpected ExtendedServerCutText Action (\(action)) was retrieved."
 			}
 		}
 	}

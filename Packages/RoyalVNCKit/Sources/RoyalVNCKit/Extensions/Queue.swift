@@ -4,30 +4,29 @@ import FoundationEssentials
 import Foundation
 #endif
 
-struct Queue<T> {
-	private var list = [T]()
+import Synchronization
 
-	mutating func enqueue(_ element: T) {
-		list.append(element)
+/// A first-in, first-out queue that the send loop drains while the API and the receive loop fill it, so it locks.
+final class Queue<T> {
+	private let list = Mutex([T]())
+
+	func enqueue(_ element: T) {
+		list.withLock { $0.append(element) }
 	}
 
-	mutating func dequeue() -> T? {
-		guard !isEmpty else { return nil }
-
-		return list.removeFirst()
+	func dequeue() -> T? {
+		list.withLock { $0.isEmpty ? nil : $0.removeFirst() }
 	}
 
-	mutating func clear() {
-		list.removeAll()
+	func clear() {
+		list.withLock { $0.removeAll() }
 	}
 
 	func peek() -> T? {
-		guard !isEmpty else { return nil }
-
-		return list[0]
+		list.withLock { $0.first }
 	}
 
 	var isEmpty: Bool {
-		list.isEmpty
+		list.withLock { $0.isEmpty }
 	}
 }

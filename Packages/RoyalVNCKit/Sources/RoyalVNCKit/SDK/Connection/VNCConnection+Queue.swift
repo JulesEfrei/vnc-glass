@@ -68,6 +68,10 @@ extension VNCConnection {
 		enqueueClientToServerMessage(clientCutTextMessage)
 	}
 
+	func enqueueExtendedClipboardMessage(_ message: VNCProtocol.ExtendedClipboard) {
+		enqueueClientToServerMessage(VNCProtocol.ExtendedClientCutText(message: message))
+	}
+
 	func enqueueClientToServerMessage(_ message: VNCSendableMessage) {
 		clientToServerMessageQueue.enqueue(message)
 	}

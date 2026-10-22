@@ -167,11 +167,22 @@ public extension VNCConnection {
 
 // MARK: - Clipboard
 public extension VNCConnection {
-	/// Sends the text as ClientCutText, in Latin-1; characters Latin-1 lacks are replaced.
+	/// Offers the text to the server over Extended Clipboard in UTF-8 when the server takes it, otherwise sends it as
+	/// ClientCutText in Latin-1, with characters Latin-1 lacks replaced.
 #if canImport(ObjectiveC)
     @objc
 #endif
 	func sendClipboardText(_ text: String) {
-		enqueueClientCutTextMessage(text)
+		let isExtended = clipboardState.withLock { state in
+			state.text = text
+
+			return state.isExtendedTextSupported
+		}
+
+		if isExtended {
+			enqueueExtendedClipboardMessage(.init(flags: [.notify, .text]))
+		} else {
+			enqueueClientCutTextMessage(text)
+		}
 	}
 }

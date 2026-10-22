@@ -5,6 +5,7 @@ import Foundation
 #endif
 
 import Dispatch
+import Synchronization
 
 #if canImport(Network)
 import Network
@@ -65,8 +66,10 @@ public final class VNCConnection: NSObjectOrAnyObject {
 
 	let clipboard: VNCClipboard
 	let clipboardMonitor: VNCClipboardMonitor
+	/// Shared by the receive loop and `sendClipboardText`.
+	let clipboardState = Mutex(ClipboardState())
 
-	var clientToServerMessageQueue = Queue<VNCSendableMessage>()
+	let clientToServerMessageQueue = Queue<VNCSendableMessage>()
 
     var mouseButtonState: VNCProtocol.MousePointerButton = [ ]
 
@@ -171,8 +174,7 @@ public final class VNCConnection: NSObjectOrAnyObject {
 			VNCPseudoEncodingType.desktopName.rawValue,
 			VNCPseudoEncodingType.cursor.rawValue,
 			VNCPseudoEncodingType.qemuExtendedKeyEvent.rawValue,
-			// TODO: Implement
-//			VNCPseudoEncodingType.extendedClipboard.rawValue,
+			VNCPseudoEncodingType.extendedClipboard.rawValue,
             
             // TODO: Make configurable
 			VNCPseudoEncodingType.compressionLevel6.rawValue

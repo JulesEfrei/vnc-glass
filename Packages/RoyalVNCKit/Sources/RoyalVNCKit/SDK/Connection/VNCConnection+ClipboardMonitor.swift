@@ -32,6 +32,6 @@ extension VNCConnection: VNCClipboardMonitorDelegate {
 
 		guard settings.isClipboardRedirectionEnabled else { return }
 
-		enqueueClientCutTextMessage(text)
+		sendClipboardText(text)
 	}
 }
