@@ -189,4 +189,13 @@ public extension VNCConnection {
 			enqueueClientCutTextMessage(text)
 		}
 	}
+
+	/// Forgets the text last given to `sendClipboardText(_:)`, so a server asking for it over Extended Clipboard gets
+	/// nothing.
+#if canImport(ObjectiveC)
+    @objc
+#endif
+	func clearClipboardText() {
+		clipboardState.withLock { $0.text = nil }
+	}
 }

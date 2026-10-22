@@ -425,6 +425,26 @@ struct SessionTests {
         #expect(keyEvents(server) == [.keyEvent(down: true, keysym: 0x31), .keyEvent(down: false, keysym: 0x31)])
     }
 
+    @Test func aCustomUnlockShortcutTogglesLockModeAndControlOptionReachesTheRemote() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+        session.unlockShortcut = try #require(UnlockShortcut(keys: [rightCmd, rightOption]))
+
+        press([rightCmd, rightOption], session)
+        #expect(session.lockMode == .locked)
+        press([rightOption, rightCmd], session)
+        #expect(session.lockMode == .unlocked)
+        press([leftControl, leftOption], session)
+
+        try await eventually { keyEvents(server).count == 4 }
+        #expect(keyEvents(server) == [
+            .keyEvent(down: true, keysym: 0xFFE3), .keyEvent(down: true, keysym: 0xFFE9), // Control_L, Alt_L
+            .keyEvent(down: false, keysym: 0xFFE9), .keyEvent(down: false, keysym: 0xFFE3),
+        ])
+        #expect(session.lockMode == .unlocked)
+    }
+
     @Test func controlOptionTReachesTheRemoteAsCtrlAltTAndLeavesLockModeAlone() async throws {
         let server = try FakeRFBServer()
         defer { server.stop() }
@@ -703,6 +723,25 @@ struct SessionTests {
         #expect(cutTexts(server) == [.clientCutText(Array("ok".utf8))])
     }
 
+    @Test func withClipboardSyncOffNoTextIsSentAndServerCutTextIsIgnored() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+        session.isClipboardSyncEnabled = false
+
+        session.localClipboardChanged(text: "secret", types: ["public.utf8-plain-text"])
+        server.send(serverCutText(Array("from remote".utf8)))
+        // The Session reads in order, so once this screen update lands the cut text has been handled.
+        server.send(screenUpdate)
+        try await eventually { session.image != nil }
+        // A key sent after the clipboard text arrives after it, so once it is in, the text would have been too.
+        press([one], session)
+        try await eventually { keyEvents(server).count == 2 }
+
+        #expect(cutTexts(server).isEmpty)
+        #expect(session.remoteClipboardText == nil)
+    }
+
     @Test func theRemoteClipboardIsReceivedAsText() async throws {
         let server = try FakeRFBServer()
         defer { server.stop() }
@@ -822,6 +861,27 @@ struct SessionTests {
 
         try await eventually { !providedTexts(server).isEmpty }
         #expect(providedTexts(server) == [Array("ok 👍".utf8) + [0]])
+    }
+
+    @Test func turningClipboardSyncOffWithdrawsTheTextAlreadyOffered() async throws {
+        let server = try FakeRFBServer(advertisedEncodings: [FakeRFBServer.extendedClipboardEncoding])
+        defer { server.stop() }
+        let session = try await extendedClipboardSession(to: server)
+        session.localClipboardChanged(text: "secret 🔑", types: ["public.utf8-plain-text"])
+        try await eventually { providedTexts(server).count == 1 }
+
+        session.isClipboardSyncEnabled = false
+        // ServerCutText with a negative length: the server asks for the client's text again.
+        let request = FakeRFBServer.ClipboardFlag.request | FakeRFBServer.ClipboardFlag.text
+        server.send([3, 0, 0, 0] + withUnsafeBytes(of: UInt32(bitPattern: -4).bigEndian, Array.init)
+                     + withUnsafeBytes(of: request.bigEndian, Array.init))
+        server.send(screenUpdate)
+        try await eventually { session.image != nil }
+        // The client answers the request before reading the update, so a key sent now lands after any answer.
+        press([one], session)
+        try await eventually { keyEvents(server).count == 2 }
+
+        #expect(providedTexts(server).count == 1)
     }
 
     @Test func withExtendedClipboardTextJustReceivedIsNotSentBack() async throws {
@@ -990,6 +1050,7 @@ private let leftControl = KeyCode(hidUsage: 0xE0)
 private let leftOption = KeyCode(hidUsage: 0xE2)
 private let leftCmd = KeyCode(hidUsage: 0xE3)
 private let rightOption = KeyCode(hidUsage: 0xE6)
+private let rightCmd = KeyCode(hidUsage: 0xE7)
 private let one = KeyCode(hidUsage: 0x1E)
 private let c = KeyCode(hidUsage: 0x06)
 private let t = KeyCode(hidUsage: 0x17)

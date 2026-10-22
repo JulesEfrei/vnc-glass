@@ -95,6 +95,13 @@ public final class Session {
     public var isLockModeAvailable = true {
         didSet { if !isLockModeAvailable && lockMode != .unlocked { leaveLock(to: .unlocked) } }
     }
+    /// The modifiers that toggle Lock Mode instead of reaching the remote.
+    public var unlockShortcut = UnlockShortcut.default
+    /// False to keep both clipboards apart: local text is not sent and the remote's is not offered to the platform.
+    /// Turning it off also withdraws the text already offered to an Extended Clipboard server.
+    public var isClipboardSyncEnabled = true {
+        didSet { if !isClipboardSyncEnabled { link?.clearClipboardText() } }
+    }
 
     @ObservationIgnored private var link: VNCConnection?
     @ObservationIgnored private var linkDelegate: LinkDelegate?
@@ -276,7 +283,8 @@ public final class Session {
 
     /// The Mac's clipboard changed to `text`, nil when it holds no text. `types` are the pasteboard types of the item.
     public func localClipboardChanged(text: String?, types: [String]) {
-        guard let link, state == .connected, text == nil || text != remoteClipboardText else { return }
+        guard let link, state == .connected, isClipboardSyncEnabled, text == nil || text != remoteClipboardText
+        else { return }
         remoteClipboardText = nil
         sentClipboardTexts = []
         // nspasteboard.org markers: password managers flag secrets as concealed, and transient items are not meant to persist.
@@ -327,17 +335,17 @@ public final class Session {
         return clicks
     }
 
-    /// Holds back left ⌃ and left ⌥ pressed with nothing else down: released with no other key in between, they are
-    /// the Unlock Shortcut and never reach the remote; any other key forwards them first.
+    /// Holds back the Unlock Shortcut's keys pressed with nothing else down: released with no other key in between,
+    /// they are the shortcut and never reach the remote; any other key forwards them first.
     private func handleKey(_ key: KeyCode, isDown: Bool) {
         if isDown {
-            if Self.unlockShortcut.contains(key), !isShortcutFired, heldKeys.isEmpty, !shortcutKeys.contains(key) {
+            if unlockShortcut.keys.contains(key), !isShortcutFired, heldKeys.isEmpty, !shortcutKeys.contains(key) {
                 shortcutKeys.append(key)
                 return
             }
             forwardShortcutKeys()
         } else if shortcutKeys.contains(key) {
-            if isShortcutFired || shortcutKeys.count == Self.unlockShortcut.count {
+            if isShortcutFired || shortcutKeys.count == unlockShortcut.keys.count {
                 shortcutKeys.removeAll { $0 == key }
                 if isShortcutFired {
                     isShortcutFired = !shortcutKeys.isEmpty
@@ -351,8 +359,6 @@ public final class Session {
         }
         send(key, isDown: isDown)
     }
-
-    private static let unlockShortcut: Set = [KeyCode(hidUsage: 0xE0), KeyCode(hidUsage: 0xE2)] // left ⌃, left ⌥
 
     private func forwardShortcutKeys() {
         let keys = shortcutKeys
@@ -461,7 +467,7 @@ public final class Session {
     }
 
     fileprivate func remoteClipboardChanged(_ text: String) {
-        guard !sentClipboardTexts.contains(text) else { return }
+        guard isClipboardSyncEnabled, !sentClipboardTexts.contains(text) else { return }
         sentClipboardTexts = []
         remoteClipboardText = text
     }

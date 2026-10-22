@@ -6,6 +6,7 @@ import SwiftUI
 /// Shows the remote screen scaled into the view, reports the view's size in pixels for Match Window, and turns AppKit mouse and key events into Session input.
 struct FramebufferView: NSViewRepresentable {
     let session: Session
+    let locksInFullScreen: Bool
 
     func makeNSView(context: Context) -> FramebufferNSView {
         FramebufferNSView(session: session)
@@ -13,6 +14,7 @@ struct FramebufferView: NSViewRepresentable {
 
     func updateNSView(_ view: FramebufferNSView, context: Context) {
         view.layer?.contents = session.image
+        view.locksInFullScreen = locksInFullScreen
         view.isCapturingSystemShortcuts = session.lockMode == .locked
         view.showRemoteCursor(session.cursor)
     }
@@ -20,6 +22,7 @@ struct FramebufferView: NSViewRepresentable {
 
 final class FramebufferNSView: NSView {
     private let session: Session
+    var locksInFullScreen = true
 
     init(session: Session) {
         self.session = session
@@ -90,7 +93,7 @@ final class FramebufferNSView: NSView {
     }
 
     @objc private func windowDidResignKey() { session.windowFocusChanged(isFocused: false) }
-    @objc private func windowDidEnterFullScreen() { session.lock() }
+    @objc private func windowDidEnterFullScreen() { if locksInFullScreen { session.lock() } }
 
     /// While Locked, an active event tap takes every key before macOS acts on it, so ⌘Tab, ⌘Space and ⌘Q reach the
     /// remote instead (ADR-0001). Needs the Accessibility permission.
@@ -278,7 +281,7 @@ private let hidUsages: [Int: UInt16] = [
 
 /// Modifier virtual key codes to their HID usage and device-dependent flag bit (IOKit's NX_DEVICE*KEYMASK).
 /// shortcut: Caps Lock is left out, since macOS reports it as a toggle; send it once Lock Mode needs it.
-private let modifierKeys: [Int: (UInt16, UInt)] = [
+let modifierKeys: [Int: (UInt16, UInt)] = [
     kVK_Control: (0xE0, 0x0001), kVK_Shift: (0xE1, 0x0002), kVK_Option: (0xE2, 0x0020), kVK_Command: (0xE3, 0x0008),
     kVK_RightControl: (0xE4, 0x2000), kVK_RightShift: (0xE5, 0x0004), kVK_RightOption: (0xE6, 0x0040),
     kVK_RightCommand: (0xE7, 0x0010),

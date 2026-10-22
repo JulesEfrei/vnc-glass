@@ -5,6 +5,9 @@ struct SessionWindow: View {
     let connection: Connection
     @State private var session: Session
     @State private var isUnauthenticatedWarningDismissed = false
+    @AppStorage("UnlockShortcut") private var unlockShortcut = UnlockShortcut.default
+    @AppStorage("LocksInFullScreen") private var locksInFullScreen = true
+    @AppStorage("IsClipboardSyncEnabled") private var isClipboardSyncEnabled = true
 
     init(connection: Connection, password: String?) {
         self.connection = connection
@@ -15,7 +18,7 @@ struct SessionWindow: View {
     }
 
     var body: some View {
-        FramebufferView(session: session)
+        FramebufferView(session: session, locksInFullScreen: locksInFullScreen)
             .background(.black)
             .overlay {
                 if let status {
@@ -74,6 +77,8 @@ struct SessionWindow: View {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(text, forType: .string)
             }
+            .onChange(of: unlockShortcut, initial: true) { session.unlockShortcut = unlockShortcut }
+            .onChange(of: isClipboardSyncEnabled, initial: true) { session.isClipboardSyncEnabled = isClipboardSyncEnabled }
             .onAppear(perform: session.connect)
             .onDisappear(perform: session.disconnect)
     }
@@ -131,7 +136,7 @@ private struct LockModeButton: View {
             }
         }
         .labelStyle(.titleAndIcon)
-        .help("Lock Mode sends every shortcut, like ⌘Tab and ⌘Q, to the remote computer. Press and release left ⌃⌥ to turn it on or off.")
+        .help("Lock Mode sends every shortcut, like ⌘Tab and ⌘Q, to the remote computer. Press and release \(session.unlockShortcut) to turn it on or off.")
         .alert("Lock Mode needs the Accessibility permission", isPresented: $isExplainingPermission) {
             Button("Open System Settings") {
                 // Asking adds VNC Glass to the Accessibility list, so the user only has to turn it on. The key is

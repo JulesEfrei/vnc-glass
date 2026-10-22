@@ -33,7 +33,7 @@ Changes from upstream:
   own (text only, every change as a notify). `ExtendedClipboard` replaces the unfinished `ExtendedServerCutText`.
   Once the server's caps take text, `sendClipboardText(_:)` notifies and provides on request in UTF-8, re-notifying
   text sent as Latin-1 before the caps arrived; a server notify is answered with a request and its provide goes to
-  the delegate. The clipboard monitor (redirection on) goes through `sendClipboardText(_:)` too. Messages over 20 MiB
+  the delegate. `clearClipboardText()` (#11) forgets the text, so a later request gets no provide. The clipboard monitor (redirection on) goes through `sendClipboardText(_:)` too. Messages over 20 MiB
   end the connection; provided text that inflates past it is dropped
   (`ZlibStream.decompressedData(compressedData:maximumLength:)`). `ProtocolError.unexpectedExtendedServerCutTextAction`
   is gone with the parser that threw it.
