@@ -187,6 +187,21 @@ struct SessionTests {
         #expect(pointerEvents(server).count == moves)
     }
 
+    /// A server sends the next frame only once asked, so the request must go out as soon as a frame arrives: a send
+    /// loop that only polls its queue caps the frame rate (under 100 a second for a 10 ms poll).
+    @Test func eachFrameIsAskedForAgainWithoutWaiting() async throws {
+        let server = try FakeRFBServer(security: .rsaAES(.aes256), answersUpdateRequests: true)
+        defer { server.stop() }
+        let session = try await loggedInSession(to: server, knownServerKeys: freshDefaults())
+        let start = updateRequests(server).count
+
+        try await Task.sleep(for: .seconds(1))
+
+        let requests = updateRequests(server).count - start
+        #expect(session.state == .connected)
+        #expect(requests > 250, "\(requests) frames in a second")
+    }
+
     @Test func aChangedServerKeyWaitsForTheUserToAcceptIt() async throws {
         let server = try FakeRFBServer(security: .rsaAES(.aes256))
         defer { server.stop() }
@@ -1196,6 +1211,10 @@ private func serverCutText(_ text: [UInt8]) -> [UInt8] {
 
 private func cutTexts(_ server: FakeRFBServer) -> [FakeRFBServer.ClientMessage] {
     server.messages.filter { if case .clientCutText = $0 { true } else { false } }
+}
+
+private func updateRequests(_ server: FakeRFBServer) -> [FakeRFBServer.ClientMessage] {
+    server.messages.filter { if case .framebufferUpdateRequest = $0 { true } else { false } }
 }
 
 private func pointerEvents(_ server: FakeRFBServer) -> [FakeRFBServer.ClientMessage] {

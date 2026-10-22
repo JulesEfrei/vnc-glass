@@ -94,6 +94,8 @@ public final class FakeRFBServer: Sendable {
     public let height: UInt16
     /// Answers every login with a failed SecurityResult.
     public let rejectsLogin: Bool
+    /// Answers every FramebufferUpdateRequest with a one-pixel update, as a server with a changing screen would.
+    public let answersUpdateRequests: Bool
     /// Encodings the server claims to support. When the client's SetEncodings lists one of them,
     /// the server answers with an empty pseudo-encoding rectangle for it, which is only a valid
     /// announcement for encodings without a payload, such as QEMU Extended Key Event (-258).
@@ -111,9 +113,11 @@ public final class FakeRFBServer: Sendable {
 
     /// `port` 0 picks a free one; a stopped server's port starts a server the same client can come back to.
     public init(port: UInt16 = 0, width: UInt16 = 64, height: UInt16 = 48, security: Security = .none,
-                rejectsLogin: Bool = false, advertisedEncodings: [Int32] = []) throws {
+                rejectsLogin: Bool = false, answersUpdateRequests: Bool = false,
+                advertisedEncodings: [Int32] = []) throws {
         self.security = security
         self.rejectsLogin = rejectsLogin
+        self.answersUpdateRequests = answersUpdateRequests
         self.width = width
         self.height = height
         self.advertisedEncodings = advertisedEncodings
@@ -278,6 +282,9 @@ public final class FakeRFBServer: Sendable {
         case .setDesktopSize(let width, let height, _):
             size.withLock { $0 = (width, height) }
             sendExtendedDesktopSize(reason: 1)
+        case .framebufferUpdateRequest where answersUpdateRequests:
+            // 1 rectangle at 0,0 sized 1x1, Raw encoding, one 32-bit pixel.
+            send([0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0] + [0, 0, 255, 0])
         default:
             break
         }

@@ -72,7 +72,8 @@ private extension VNCConnection {
               connection.isReady,
 			  let message = clientToServerMessageQueue.dequeue() else {
 			if state.disconnectWhenQueueIsEmpty { return beginDisconnecting() }
-			try await Task.sleep(seconds: 0.01)
+			// The poll only catches a disconnect being asked for; queued messages wake the loop at once.
+			await clientToServerMessageQueue.waitForElement(timeout: .milliseconds(10))
 
 			return
 		}
