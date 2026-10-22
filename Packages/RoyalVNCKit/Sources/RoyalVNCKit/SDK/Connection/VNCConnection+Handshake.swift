@@ -103,8 +103,13 @@ private extension VNCConnection {
 
 		let supportedSecurityTypes = supportedTypes.securityTypes
 
+		// No login still wins when offered. Among logins, the RSA-AES types come first: every other one leaves the RFB session unencrypted.
 		if supportedSecurityTypes.contains(.none) {
 			chosenSecurityType = .none
+		} else if supportedSecurityTypes.contains(.rsaAES256) {
+			chosenSecurityType = .rsaAES256
+		} else if supportedSecurityTypes.contains(.rsaAES) {
+			chosenSecurityType = .rsaAES
 		} else if supportedSecurityTypes.contains(.diffieHellman) {
 			chosenSecurityType = .diffieHellman
 		} else if supportedSecurityTypes.contains(.ultraVNCMSLogonII) {
@@ -158,6 +163,10 @@ private extension VNCConnection {
 				shouldRequestSecurityTypeResult = true
 
 				try await performUltraVNCMSLogonIIAuthentication()
+			case .rsaAES, .rsaAES256:
+				shouldRequestSecurityTypeResult = true
+
+				try await performRSAAESAuthentication(.init(is256: securityType == .rsaAES256))
 //			case .tight:
 //				shouldRequestSecurityTypeResult = true
 //				isTightSecurityEnabled = true
@@ -199,6 +208,61 @@ private extension VNCConnection {
 
 		try await auth.send(connection: connection,
 							credential: credential)
+	}
+
+	/// Everything after the random exchange, including the SecurityResult and the rest of the session, is encrypted.
+	func performRSAAESAuthentication(_ auth: VNCProtocol.RSAAESAuthentication) async throws {
+		let serverKey = try await VNCProtocol.RSAAESAuthentication.PublicKey.receive(connection: connection)
+
+		try await askDelegateToTrustServerKey(fingerprint: serverKey.fingerprint)
+
+		let clientKey = try VNCProtocol.RSAAESAuthentication.ClientKey()
+
+		try await connection.write(data: Data(clientKey.message))
+
+		let encryptedServerRandom = try await connection.readBuffered(length: Int(connection.readUInt16()))
+		let serverRandom = try VNCProtocol.RSAAESAuthentication.decrypt(encryptedServerRandom, with: clientKey.privateKey)
+
+		guard serverRandom.count == auth.keyLength else {
+			throw VNCError.authentication(.rsaAESAuthenticationFailed)
+		}
+
+		let clientRandom = try VNCProtocol.RSAAESAuthentication.randomBytes(auth.keyLength)
+		let encryptedClientRandom = try VNCProtocol.RSAAESAuthentication.encrypt(clientRandom, for: serverKey.key)
+
+		try await connection.write(data: Data([ UInt8(encryptedClientRandom.count >> 8), UInt8(encryptedClientRandom.count & 0xFF) ] + encryptedClientRandom))
+
+		try connection.startEncryption(sendKey: Array(auth.hash(serverRandom + clientRandom).prefix(auth.keyLength)),
+									   receiveKey: Array(auth.hash(clientRandom + serverRandom).prefix(auth.keyLength)))
+
+		// Both sides prove they hold the same pair of public keys.
+		let serverHash = auth.hash(serverKey.message + clientKey.message)
+
+		guard [UInt8](try await connection.readBuffered(length: serverHash.count)) == serverHash else {
+			throw VNCError.authentication(.rsaAESAuthenticationFailed)
+		}
+
+		try await connection.write(data: Data(auth.hash(clientKey.message + serverKey.message)))
+
+		let credentials: [UInt8]
+
+		switch try await connection.readUInt8() {
+			case 1:
+				let credential = try await askDelegateForUsernamePasswordCredential(authenticationType: .rsaAES)
+
+				credentials = try VNCProtocol.RSAAESAuthentication.credentialsMessage(username: credential.username,
+																					  password: credential.password)
+			case 2:
+				// Password only, which is what the VNC password prompt asks for.
+				let credential = try await askDelegateForPasswordCredential(authenticationType: .vnc)
+
+				credentials = try VNCProtocol.RSAAESAuthentication.credentialsMessage(username: "",
+																					  password: credential.password)
+			default:
+				throw VNCError.authentication(.rsaAESAuthenticationFailed)
+		}
+
+		try await connection.write(data: Data(credentials))
 	}
 
 	func receiveSecurityTypeResult() async throws {

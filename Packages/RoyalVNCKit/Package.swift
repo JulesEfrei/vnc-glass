@@ -34,6 +34,8 @@ let package = Package(
             ]
         ),
 
+        .testTarget(name: "RoyalVNCKitTests", dependencies: [ "RoyalVNCKit" ]),
+
         .target(name: "d3des"),
 
         .target(name: "Z", linkerSettings: [

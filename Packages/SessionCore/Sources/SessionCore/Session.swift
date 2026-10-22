@@ -24,6 +24,13 @@ public struct CredentialRequest: Equatable, Sendable {
     }
 }
 
+/// The server's key differs from the one remembered for its address and port, as when the server was reinstalled or
+/// someone is in the middle. The Session waits for `trustServerKey` or `rejectServerKey`.
+public struct ServerKeyChange: Equatable, Sendable {
+    /// The new key's fingerprint, written like SSH's: `SHA256:` and the unpadded Base64 of the digest.
+    public let fingerprint: String
+}
+
 /// One live link to a remote computer.
 @MainActor @Observable
 public final class Session {
@@ -41,14 +48,20 @@ public final class Session {
     public private(set) var image: CGImage?
     /// Set while the server waits for `submitCredentials` or `cancelCredentials`.
     public private(set) var credentialRequest: CredentialRequest?
+    /// Set while the Session waits for the user to accept or refuse a changed server key.
+    public private(set) var serverKeyChange: ServerKeyChange?
 
     @ObservationIgnored private var link: VNCConnection?
     @ObservationIgnored private var linkDelegate: LinkDelegate?
     @ObservationIgnored private var credentialReply: CredentialReply?
+    @ObservationIgnored private var serverKeyReply: ServerKeyReply?
+    /// Remembers each server's key fingerprint by address and port, trusting the first one seen.
+    @ObservationIgnored private let knownServerKeys: UserDefaults
 
-    public init(address: String, port: UInt16) {
+    public init(address: String, port: UInt16, knownServerKeys: UserDefaults = .standard) {
         self.address = address
         self.port = port
+        self.knownServerKeys = knownServerKeys
     }
 
     public func connect() {
@@ -76,7 +89,31 @@ public final class Session {
 
     public func disconnect() {
         cancelCredentials()
+        rejectServerKey()
         link?.disconnect()
+    }
+
+    /// Accepts the changed server key, remembers it in place of the old one and goes on connecting.
+    public func trustServerKey() {
+        guard let reply = serverKeyReply else { return }
+        knownServerKeys.set(reply.fingerprint, forKey: serverKeyDefaultsKey)
+        answerServerKeyChange(true)
+    }
+
+    /// Refuses the changed server key; the Session disconnects.
+    public func rejectServerKey() {
+        answerServerKeyChange(false)
+    }
+
+    private func answerServerKeyChange(_ isTrusted: Bool) {
+        let reply = serverKeyReply
+        serverKeyReply = nil
+        serverKeyChange = nil
+        reply?.send(isTrusted)
+    }
+
+    private var serverKeyDefaultsKey: String {
+        "ServerKeyFingerprint \(address):\(port)"
     }
 
     public func submitCredentials(username: String, password: String) {
@@ -137,6 +174,8 @@ public final class Session {
         case .disconnected:
             credentialReply = nil
             credentialRequest = nil
+            serverKeyReply = nil
+            serverKeyChange = nil
             state = .disconnected(error: error)
         case .disconnecting: break
         }
@@ -145,6 +184,20 @@ public final class Session {
     fileprivate func credentialsRequested(_ request: CredentialRequest, reply: CredentialReply) {
         credentialRequest = request
         credentialReply = reply
+    }
+
+    fileprivate func serverKeyPresented(_ reply: ServerKeyReply) {
+        switch knownServerKeys.data(forKey: serverKeyDefaultsKey) {
+        case nil:
+            knownServerKeys.set(reply.fingerprint, forKey: serverKeyDefaultsKey)
+            reply.send(true)
+        case reply.fingerprint:
+            reply.send(true)
+        default:
+            let base64 = reply.fingerprint.base64EncodedString().trimmingCharacters(in: ["="])
+            serverKeyChange = ServerKeyChange(fingerprint: "SHA256:\(base64)")
+            serverKeyReply = reply
+        }
     }
 
     fileprivate func framebufferChanged() {
@@ -177,6 +230,16 @@ private final class LinkDelegate: NSObject, VNCConnectionDelegate, Sendable {
         Task { @MainActor [weak session] in
             guard let session else { return reply.send(nil) }
             session.credentialsRequested(request, reply: reply)
+        }
+    }
+
+    func connection(_ connection: VNCConnection,
+                    shouldTrustServerKey fingerprint: Data,
+                    completion: @escaping (Bool) -> Void) {
+        let reply = ServerKeyReply(fingerprint: fingerprint, send: completion)
+        Task { @MainActor [weak session] in
+            guard let session else { return reply.send(false) }
+            session.serverKeyPresented(reply)
         }
     }
 
@@ -214,4 +277,10 @@ private final class LinkDelegate: NSObject, VNCConnectionDelegate, Sendable {
 /// RoyalVNCKit's credential completion, carried to the main actor and called exactly once from there.
 private struct CredentialReply: @unchecked Sendable {
     let send: (VNCCredential?) -> Void
+}
+
+/// RoyalVNCKit's server key completion with the key's SHA-256 fingerprint, called exactly once from the main actor.
+private struct ServerKeyReply: @unchecked Sendable {
+    let fingerprint: Data
+    let send: (Bool) -> Void
 }

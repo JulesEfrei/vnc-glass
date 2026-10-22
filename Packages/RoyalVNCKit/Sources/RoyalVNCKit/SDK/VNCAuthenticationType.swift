@@ -11,6 +11,8 @@ public enum VNCAuthenticationType: Int {
 	case vnc
 	case appleRemoteDesktop
 	case ultraVNCMSLogonII
+	/// RSA-AES asking for username and password. When it asks for a password only, the request is `.vnc`.
+	case rsaAES
 }
 
 public extension VNCAuthenticationType {
@@ -22,6 +24,8 @@ public extension VNCAuthenticationType {
 				true
 			case .ultraVNCMSLogonII:
 				true
+			case .rsaAES:
+				true
 		}
 	}
 
@@ -32,6 +36,8 @@ public extension VNCAuthenticationType {
 			case .appleRemoteDesktop:
 				true
 			case .ultraVNCMSLogonII:
+				true
+			case .rsaAES:
 				true
 		}
 	}

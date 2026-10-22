@@ -70,7 +70,7 @@ public final class VNCConnection: NSObjectOrAnyObject {
 
     var mouseButtonState: VNCProtocol.MousePointerButton = [ ]
 
-    lazy var connection: some NetworkConnection = {
+    lazy var connection: RFBStream = {
         let connectionSettings = NetworkConnectionSettings(connectionTimeout: 15,
                                                            host: settings.hostname,
                                                            port: settings.port)
@@ -84,7 +84,7 @@ public final class VNCConnection: NSObjectOrAnyObject {
 
         connection.setStatusUpdateHandler(connectionStatusDidChange)
 
-		return connection
+		return RFBStream(base: connection)
 	}()
 
 	lazy var encodings: Encodings = {

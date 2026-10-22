@@ -13,6 +13,8 @@ public extension VNCError {
 		case ardAuthenticationFailed
 		case ultraVNCMSLogonIIAuthenticationFailed
 		case encryptionFailed
+		case rsaAESAuthenticationFailed
+		case serverKeyNotTrusted
 
 		// MARK: - LocalizedError
 		public var errorDescription: String? {
@@ -34,6 +36,10 @@ public extension VNCError {
 					return "UltraVNC MS-Logon II authentication failed."
 				case .encryptionFailed:
 					return "Encryption failed."
+				case .rsaAESAuthenticationFailed:
+					return "RSA-AES authentication failed."
+				case .serverKeyNotTrusted:
+					return "The Server's key was not trusted."
 			}
 		}
 	}

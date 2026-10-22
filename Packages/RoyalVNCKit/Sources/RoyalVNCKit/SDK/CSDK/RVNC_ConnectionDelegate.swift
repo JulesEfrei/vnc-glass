@@ -104,6 +104,13 @@ extension VNCConnectionDelegate_C: VNCConnectionDelegate {
         )
     }
 
+    // The C SDK has no callback for this, so it refuses keys rather than trusting them unseen.
+    func connection(_ connection: VNCConnection,
+                    shouldTrustServerKey fingerprint: Data,
+                    completion: @escaping (Bool) -> Void) {
+        completion(false)
+    }
+
     func connection(_ connection: VNCConnection,
                     didCreateFramebuffer framebuffer: VNCFramebuffer) {
         self.didCreateFramebuffer(

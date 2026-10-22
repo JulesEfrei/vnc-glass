@@ -34,6 +34,24 @@ extension VNCConnection {
 							 didUpdateCursor: cursor)
 	}
 
+	/// Throws unless the delegate trusts the server's key.
+	func askDelegateToTrustServerKey(fingerprint: Data) async throws {
+		guard let delegate else {
+			throw VNCError.authentication(.serverKeyNotTrusted)
+		}
+
+		let isTrusted = await withCheckedContinuation { continuation in
+			delegate.connection(self,
+								shouldTrustServerKey: fingerprint) { isTrusted in
+				continuation.resume(returning: isTrusted)
+			}
+		}
+
+		guard isTrusted else {
+			throw VNCError.authentication(.serverKeyNotTrusted)
+		}
+	}
+
 	func askDelegateForPasswordCredential(authenticationType: VNCAuthenticationType) async throws -> VNCPasswordCredential {
 		guard let passwordCredential = try await askDelegateForCredential(authenticationType: authenticationType) as? VNCPasswordCredential else {
 			throw VNCError.authentication(.noAuthenticationDataProvided)

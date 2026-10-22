@@ -35,6 +35,20 @@ struct SessionWindow: View {
             )) {
                 CredentialsForm(session: session, target: target)
             }
+            .alert("The server's identity has changed", isPresented: Binding(
+                get: { session.serverKeyChange != nil },
+                set: { if !$0 { session.rejectServerKey() } }
+            )) {
+                Button("Disconnect", role: .cancel, action: session.rejectServerKey)
+                Button("Trust New Key", role: .destructive, action: session.trustServerKey)
+            } message: {
+                Text("""
+                \(target.address) sent a different key than last time. This happens when the server is \
+                reinstalled or its key is replaced, but it can also mean someone is intercepting the connection.
+
+                New key: \(session.serverKeyChange?.fingerprint ?? "")
+                """)
+            }
             .onAppear(perform: session.connect)
             .onDisappear(perform: session.disconnect)
     }

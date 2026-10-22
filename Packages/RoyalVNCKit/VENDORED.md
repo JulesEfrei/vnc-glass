@@ -12,3 +12,7 @@ Changes from upstream:
 - `Package.swift`: Apple platforms only (macOS 26, iOS 26), SwiftPM's default library type instead of a dynamic one, no library evolution,
   and CryptoSwift from its main repository instead of Royal Apps' fork (whose only changes are for
   Linux FoundationEssentials).
+- RSA-AES and RSA-AES-256 security types (#13, ADR-0003): `RSAAESAuthentication`, `RSAAESFrameCipher`, and
+  `RFBStream`, which wraps the network connection and encrypts both directions after the key exchange. The delegate
+  gains `connection(_:shouldTrustServerKey:completion:)`, `VNCAuthenticationType` gains `.rsaAES`, and the C SDK
+  refuses unknown server keys. A `RoyalVNCKitTests` target holds the cipher's fixed vectors.

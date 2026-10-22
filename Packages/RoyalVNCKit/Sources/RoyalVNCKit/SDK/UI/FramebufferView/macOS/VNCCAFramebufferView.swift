@@ -890,7 +890,26 @@ extension VNCCAFramebufferView: VNCConnectionDelegate {
             completion: completion
         )
     }
-    
+
+    // Passthrough
+    public func connection(
+        _ connection: VNCConnection,
+        shouldTrustServerKey fingerprint: Data,
+        completion: @escaping (Bool) -> Void
+    ) {
+        guard let delegate else {
+            completion(false)
+
+            return
+        }
+
+        delegate.connection(
+            connection,
+            shouldTrustServerKey: fingerprint,
+            completion: completion
+        )
+    }
+
     // Passthrough
     public func connection(
         _ connection: VNCConnection,

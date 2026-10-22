@@ -1,4 +1,5 @@
 import FakeRFBServer
+import Foundation
 import SessionCore
 import Testing
 
@@ -45,6 +46,104 @@ struct SessionTests {
         try await eventually {
             if case .disconnected = session.state { true } else { false }
         }
+        #expect(session.credentialRequest == nil)
+    }
+
+    @Test(arguments: [FakeRFBServer.RSAAESType.aes128, .aes256])
+    func logsInWithUsernameAndPasswordOverRSAAES(type: FakeRFBServer.RSAAESType) async throws {
+        let server = try FakeRFBServer(security: .rsaAES(type))
+        defer { server.stop() }
+        let session = Session(address: "127.0.0.1", port: server.port, knownServerKeys: freshDefaults())
+
+        session.connect()
+        try await eventually { session.credentialRequest != nil }
+        #expect(session.credentialRequest == CredentialRequest(needsUsername: true))
+
+        session.submitCredentials(username: "jane", password: "secret")
+
+        try await eventually { session.state == .connected }
+        // The decrypted credentials message: length-prefixed UTF-8 username, then password.
+        #expect(server.authenticationResponse == [4] + Array("jane".utf8) + [6] + Array("secret".utf8))
+    }
+
+    @Test func asksForThePasswordOnlyWhenTheRSAAESServerNeedsNoUsername() async throws {
+        let server = try FakeRFBServer(security: .rsaAES(.aes256, passwordOnly: true))
+        defer { server.stop() }
+        let session = Session(address: "127.0.0.1", port: server.port, knownServerKeys: freshDefaults())
+
+        session.connect()
+        try await eventually { session.credentialRequest != nil }
+        #expect(session.credentialRequest == CredentialRequest(needsUsername: false))
+
+        session.submitCredentials(username: "ignored", password: "secret")
+
+        try await eventually { session.state == .connected }
+        #expect(server.authenticationResponse == [0, 6] + Array("secret".utf8))
+    }
+
+    @Test func inputAndScreenUpdatesTravelOverTheEncryptedStream() async throws {
+        let server = try FakeRFBServer(width: 64, height: 48, security: .rsaAES(.aes256))
+        defer { server.stop() }
+        let session = try await loggedInSession(to: server, knownServerKeys: freshDefaults())
+        #expect(session.image == nil)
+
+        session.handle(.key(KeyCode(hidUsage: 0x04), isDown: true))
+        session.handle(.pointerButton(.left, isDown: true, x: 10, y: 20))
+        // FramebufferUpdate, 1 rectangle at 0,0 sized 2x1, Raw encoding, two 32-bit pixels.
+        server.send([0, 0, 0, 1, 0, 0, 0, 0, 0, 2, 0, 1, 0, 0, 0, 0] + [0, 0, 255, 0, 255, 0, 0, 0])
+
+        try await eventually { keyEvents(server).count == 1 && pointerEvents(server).count == 1 }
+        #expect(keyEvents(server) == [.keyEvent(down: true, keysym: 0x61)])
+        #expect(pointerEvents(server) == [.pointerEvent(buttonMask: 1, x: 10, y: 20)])
+        // The Session has no picture until the server's first update arrives.
+        try await eventually { session.image != nil }
+    }
+
+    @Test func aChangedServerKeyWaitsForTheUserToAcceptIt() async throws {
+        let server = try FakeRFBServer(security: .rsaAES(.aes256))
+        defer { server.stop() }
+        let knownServerKeys = freshDefaults()
+        try await loggedInSession(to: server, knownServerKeys: knownServerKeys).disconnect()
+
+        try server.replaceServerKey()
+        let session = Session(address: "127.0.0.1", port: server.port, knownServerKeys: knownServerKeys)
+        session.connect()
+
+        try await eventually { session.serverKeyChange != nil }
+        #expect(session.serverKeyChange?.fingerprint.hasPrefix("SHA256:") == true)
+        // Stopped before the login: no credentials asked for.
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(session.credentialRequest == nil)
+        #expect(session.state == .connecting)
+
+        session.trustServerKey()
+        try await eventually { session.credentialRequest != nil }
+        session.submitCredentials(username: "jane", password: "secret")
+        try await eventually { session.state == .connected }
+        session.disconnect()
+
+        // The accepted key is now the remembered one.
+        let again = try await loggedInSession(to: server, knownServerKeys: knownServerKeys)
+        #expect(again.serverKeyChange == nil)
+    }
+
+    @Test func refusingAChangedServerKeyDisconnects() async throws {
+        let server = try FakeRFBServer(security: .rsaAES(.aes256))
+        defer { server.stop() }
+        let knownServerKeys = freshDefaults()
+        try await loggedInSession(to: server, knownServerKeys: knownServerKeys).disconnect()
+
+        try server.replaceServerKey()
+        let session = Session(address: "127.0.0.1", port: server.port, knownServerKeys: knownServerKeys)
+        session.connect()
+        try await eventually { session.serverKeyChange != nil }
+
+        session.rejectServerKey()
+
+        try await eventually {
+            if case .disconnected = session.state { true } else { false }
+        }
+        #expect(session.serverKeyChange == nil)
         #expect(session.credentialRequest == nil)
     }
 
@@ -129,6 +228,23 @@ struct SessionTests {
 private func connectedSession(to server: FakeRFBServer) async throws -> Session {
     let session = Session(address: "127.0.0.1", port: server.port)
     session.connect()
+    try await eventually { session.state == .connected }
+    return session
+}
+
+/// An empty settings domain, so no test sees server keys remembered by another.
+private func freshDefaults() -> UserDefaults {
+    UserDefaults(suiteName: "SessionTests.\(UUID().uuidString)")!
+}
+
+/// Connects to an RSA-AES server and logs in. A key the Session has not seen before is trusted without asking.
+@MainActor
+private func loggedInSession(to server: FakeRFBServer, knownServerKeys: UserDefaults) async throws -> Session {
+    let session = Session(address: "127.0.0.1", port: server.port, knownServerKeys: knownServerKeys)
+    session.connect()
+    try await eventually { session.credentialRequest != nil }
+    #expect(session.serverKeyChange == nil)
+    session.submitCredentials(username: "jane", password: "secret")
     try await eventually { session.state == .connected }
     return session
 }

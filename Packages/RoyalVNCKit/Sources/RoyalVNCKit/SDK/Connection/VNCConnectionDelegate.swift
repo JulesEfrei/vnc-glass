@@ -21,6 +21,15 @@ public protocol VNCConnectionDelegate: AnyObject {
 					credentialFor authenticationType: VNCAuthenticationType,
 					completion: @escaping (_ credential: VNCCredential?) -> Void)
 
+	/// Asked before logging in over RSA-AES. `fingerprint` is the SHA-256 of the server's public key message;
+	/// call `completion` exactly once, with false to disconnect.
+#if canImport(ObjectiveC)
+    @objc
+#endif
+	func connection(_ connection: VNCConnection,
+					shouldTrustServerKey fingerprint: Data,
+					completion: @escaping (_ isTrusted: Bool) -> Void)
+
 #if canImport(ObjectiveC)
     @objc
 #endif

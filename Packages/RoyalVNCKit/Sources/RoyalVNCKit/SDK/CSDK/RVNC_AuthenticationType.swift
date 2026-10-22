@@ -15,6 +15,8 @@ extension RVNC_AUTHENTICATIONTYPE {
                 .appleRemoteDesktop
             case RVNC_AUTHENTICATIONTYPE_ULTRAVNCMSLOGONII:
                 .ultraVNCMSLogonII
+            case RVNC_AUTHENTICATIONTYPE_RSAAES:
+                .rsaAES
             default:
                 fatalError("Unknown authentication type: \(self)")
         }
@@ -30,6 +32,8 @@ extension VNCAuthenticationType {
                 RVNC_AUTHENTICATIONTYPE_APPLEREMOTEDESKTOP
             case .ultraVNCMSLogonII:
                 RVNC_AUTHENTICATIONTYPE_ULTRAVNCMSLOGONII
+            case .rsaAES:
+                RVNC_AUTHENTICATIONTYPE_RSAAES
         }
     }
 }
