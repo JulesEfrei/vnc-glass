@@ -8,7 +8,7 @@ jobs:
   test:
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - run: swift test --package-path Packages/RoyalVNCKit
       - run: swift test --package-path Packages/SessionCore
 
@@ -20,7 +20,7 @@ jobs:
       contents: write
     concurrency: release
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - run: brew install xcodegen && xcodegen generate
       # shortcut: ad-hoc signed, not notarized (ADR-0001 wants Developer ID); add the certificate and notarytool once secrets exist.
       - run: >
