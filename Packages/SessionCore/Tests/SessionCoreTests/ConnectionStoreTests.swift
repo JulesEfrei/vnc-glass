@@ -52,4 +52,25 @@ struct ConnectionStoreTests {
 
         #expect(store.password(for: desk.id) == nil)
     }
+
+    @Test func theKeyboardProfileIsSavedWithTheConnection() throws {
+        let store = ConnectionStore(defaults: defaults, keychain: keychain)
+        var desk = Connection(name: "Desk", address: "100.64.0.1", port: 5900, username: "")
+        #expect(desk.keyboardProfile == .default)
+        desk.keyboardProfile = .macStyle
+
+        try store.save(desk, password: "")
+
+        #expect(ConnectionStore(defaults: defaults, keychain: keychain).connections.first?.keyboardProfile == .macStyle)
+    }
+
+    @Test func connectionsSavedBeforeKeyboardProfilesExistedStillLoad() {
+        let saved = #"[{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","name":"Desk","address":"100.64.0.1","port":5900,"username":""}]"#
+        defaults.set(Data(saved.utf8), forKey: "Connections")
+
+        let connections = ConnectionStore(defaults: defaults, keychain: keychain).connections
+
+        #expect(connections.map(\.name) == ["Desk"])
+        #expect(connections.first?.keyboardProfile == .default)
+    }
 }

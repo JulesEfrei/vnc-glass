@@ -81,6 +81,17 @@ private struct ConnectionEditor: View {
             } footer: {
                 Text("The password is kept in your Keychain.")
             }
+            Section {
+                Picker("Keyboard Profile", selection: $draft.keyboardProfile) {
+                    Text("Default").tag(KeyboardProfile.default)
+                    Text("Mac-style").tag(KeyboardProfile.macStyle)
+                }
+            } footer: {
+                switch draft.keyboardProfile {
+                case .default: Text("⌘ sends Super, ⌃ sends Ctrl, ⌥ sends Alt.")
+                case .macStyle: Text("⌘ sends Ctrl, so ⌘C copies on the remote. ⌃ sends Ctrl, ⌥ sends Alt.")
+                }
+            }
         }
         .formStyle(.grouped)
         .navigationTitle(draft.name)

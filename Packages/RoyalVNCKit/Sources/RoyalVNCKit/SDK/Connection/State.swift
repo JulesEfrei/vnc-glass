@@ -25,6 +25,11 @@ extension VNCConnection {
 
 		var areContinuousUpdatesSupported = false
 		var areContinuousUpdatesEnabled = false
+
+		var isQEMUExtendedKeyEventSupported = false
+
+		/// Set by a requested disconnect while connected: the send loop disconnects once the queue is empty.
+		var disconnectWhenQueueIsEmpty = false
 	}
 }
 

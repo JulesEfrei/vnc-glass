@@ -8,13 +8,15 @@ import Synchronization
 /// It serves one client at a time and accepts the next one once the current client is gone.
 /// Call `stop()` when done: the accept thread keeps the server alive until then.
 public final class FakeRFBServer: Sendable {
-    public enum ClientMessage: Equatable, Sendable {
+    public enum ClientMessage: Hashable, Sendable {
         case setPixelFormat
         case setEncodings([Int32])
         case framebufferUpdateRequest(incremental: Bool)
         case keyEvent(down: Bool, keysym: UInt32)
         case pointerEvent(buttonMask: UInt8, x: UInt16, y: UInt16)
         case clientCutText([UInt8])
+        /// QEMU Extended Key Event: the keysym and the XT keycode, with E0-prefixed keys as 0x80 | low byte.
+        case qemuKeyEvent(down: Bool, keysym: UInt32, keycode: UInt32)
         /// A message type the server cannot parse yet. Its length is unknown, so the server drops the client.
         case unknown(type: UInt8)
     }
@@ -289,6 +291,9 @@ public final class FakeRFBServer: Sendable {
         case 6:
             guard let header = reader.read(7), let text = reader.read(Int(u32(header, 3))) else { return nil }
             return .clientCutText(text)
+        case 255:
+            guard let body = reader.read(11), body[0] == 0 else { return .unknown(type: type) }
+            return .qemuKeyEvent(down: u16(body, 1) != 0, keysym: u32(body, 3), keycode: u32(body, 7))
         default:
             return .unknown(type: type)
         }

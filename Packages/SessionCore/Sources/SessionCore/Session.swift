@@ -76,15 +76,20 @@ public final class Session {
     @ObservationIgnored private let knownServerKeys: UserDefaults
     /// The username given to servers that ask for one, and prefilled in the prompt.
     public let username: String
+    public let keyboardProfile: KeyboardProfile
     /// Answers the server's login without asking. Dropped once the server rejects it, so the user is asked instead.
     @ObservationIgnored private var savedPassword: String?
     @ObservationIgnored private var wasAskedForCredentials = false
+    /// Remote keys sent down and not yet up, with how many local keys hold each (both ⌥ keys hold Alt_L).
+    /// Released on disconnect so none stay stuck (wayvnc #461).
+    @ObservationIgnored private var heldKeys: [KeyCode: Int] = [:]
 
     public init(address: String, port: UInt16, username: String = "", password: String? = nil,
-                knownServerKeys: UserDefaults = .standard) {
+                keyboardProfile: KeyboardProfile = .default, knownServerKeys: UserDefaults = .standard) {
         self.address = address
         self.port = port
         self.username = username
+        self.keyboardProfile = keyboardProfile
         savedPassword = password
         self.knownServerKeys = knownServerKeys
     }
@@ -117,6 +122,7 @@ public final class Session {
     public func disconnect() {
         cancelCredentials()
         rejectServerKey()
+        releaseHeldKeys()
         link?.disconnect()
     }
 
@@ -166,12 +172,14 @@ public final class Session {
         guard let link, state == .connected else { return }
         switch event {
         case .key(let key, let isDown):
-            // shortcut: only keys with a fixed unmodified keysym are sent; Keyboard Profiles (#4) replace this.
-            guard let keysym = key.keysym else { return }
+            let remoteKey = keyboardProfile.remoteKey(for: key)
+            guard let (keysym, scancode) = remoteKey.remote else { return }
             if isDown {
-                link.keyDown(VNCKeyCode(keysym))
-            } else {
-                link.keyUp(VNCKeyCode(keysym))
+                heldKeys[remoteKey, default: 0] += 1
+                if heldKeys[remoteKey] == 1 { link.keyDown(VNCKeyCode(keysym), scancode: scancode) }
+            } else if let count = heldKeys[remoteKey] {
+                heldKeys[remoteKey] = count > 1 ? count - 1 : nil
+                if count == 1 { link.keyUp(VNCKeyCode(keysym), scancode: scancode) }
             }
         case .pointerMoved(let x, let y):
             guard let (x, y) = remotePixel(x, y) else { return }
@@ -185,6 +193,14 @@ public final class Session {
                 link.mouseButtonUp(button, x: x, y: y)
             }
         }
+    }
+
+    private func releaseHeldKeys() {
+        for key in heldKeys.keys {
+            guard let (keysym, scancode) = key.remote else { continue }
+            link?.keyUp(VNCKeyCode(keysym), scancode: scancode)
+        }
+        heldKeys = [:]
     }
 
     private func remotePixel(_ x: Double, _ y: Double) -> (UInt16, UInt16)? {
@@ -206,6 +222,7 @@ public final class Session {
             credentialRequest = nil
             serverKeyReply = nil
             serverKeyChange = nil
+            heldKeys = [:]
             if failure == .authenticationFailed { savedPassword = nil }
             state = .disconnected(failure)
         case .disconnecting: break

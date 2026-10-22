@@ -11,6 +11,7 @@ public enum VNCPseudoEncodingType: VNCEncodingType {
 	case continuousUpdates = -313
 	case desktopSize = -223
 	case extendedDesktopSize = -308
+	case qemuExtendedKeyEvent = -258
 
 	// Level 1 means lowest compression level, Level 10 means highest compression level
 
@@ -57,6 +58,8 @@ extension VNCPseudoEncodingType: CustomStringConvertible {
 				"Desktop Size"
 			case .extendedDesktopSize:
 				"Extended Desktop Size"
+			case .qemuExtendedKeyEvent:
+				"QEMU Extended Key Event"
 			case .compressionLevel1:
 				"Compression Level 1"
 			case .compressionLevel2:

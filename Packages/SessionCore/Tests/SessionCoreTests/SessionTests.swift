@@ -246,6 +246,116 @@ struct SessionTests {
         ])
     }
 
+    @Test func withTheDefaultProfileCmdIsSuper() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server, keyboardProfile: .default)
+
+        press([leftCmd, one], session)
+
+        try await eventually { keyEvents(server).count == 4 }
+        #expect(keyEvents(server) == [
+            .keyEvent(down: true, keysym: 0xFFEB), .keyEvent(down: true, keysym: 0x31), // Super_L, 1
+            .keyEvent(down: false, keysym: 0x31), .keyEvent(down: false, keysym: 0xFFEB),
+        ])
+    }
+
+    @Test func withTheMacStyleProfileCmdIsCtrl() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server, keyboardProfile: .macStyle)
+
+        press([leftCmd, c], session)
+
+        try await eventually { keyEvents(server).count == 4 }
+        #expect(keyEvents(server) == [
+            .keyEvent(down: true, keysym: 0xFFE3), .keyEvent(down: true, keysym: 0x63), // Control_L, c
+            .keyEvent(down: false, keysym: 0x63), .keyEvent(down: false, keysym: 0xFFE3),
+        ])
+    }
+
+    @Test(arguments: KeyboardProfile.allCases)
+    func bothOptionKeysAreAlt(profile: KeyboardProfile) async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server, keyboardProfile: profile)
+
+        press([leftOption], session)
+        press([rightOption], session)
+
+        try await eventually { keyEvents(server).count == 4 }
+        let altL = FakeRFBServer.ClientMessage.keyEvent(down: true, keysym: 0xFFE9)
+        let altLUp = FakeRFBServer.ClientMessage.keyEvent(down: false, keysym: 0xFFE9)
+        #expect(keyEvents(server) == [altL, altLUp, altL, altLUp])
+    }
+
+    @Test func keysGoAsScancodesWhenTheServerAdvertisesQEMUExtendedKeyEvents() async throws {
+        let server = try FakeRFBServer(advertisedEncodings: [-258])
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+        try await waitForAnnouncements(server, session)
+
+        press([leftCmd, one], session)
+
+        try await eventually { keyEvents(server).count == 4 }
+        // XT scancodes: Left GUI is E0 5B, sent as 0xDB; the 1 key is 0x02.
+        #expect(keyEvents(server) == [
+            .qemuKeyEvent(down: true, keysym: 0xFFEB, keycode: 0xDB), .qemuKeyEvent(down: true, keysym: 0x31, keycode: 0x02),
+            .qemuKeyEvent(down: false, keysym: 0x31, keycode: 0x02), .qemuKeyEvent(down: false, keysym: 0xFFEB, keycode: 0xDB),
+        ])
+    }
+
+    @Test func keysGoAsKeysymsWhenTheServerDoesNotAdvertiseQEMUExtendedKeyEvents() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+        try await waitForAnnouncements(server, session)
+
+        press([one], session)
+
+        try await eventually { keyEvents(server).count == 2 }
+        #expect(keyEvents(server) == [.keyEvent(down: true, keysym: 0x31), .keyEvent(down: false, keysym: 0x31)])
+    }
+
+    @Test func releasingOneOfTwoOptionKeysKeepsAltDown() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+
+        session.handle(.key(leftOption, isDown: true))
+        session.handle(.key(rightOption, isDown: true))
+        session.handle(.key(leftOption, isDown: false))
+        session.handle(.key(one, isDown: true))
+        session.handle(.key(one, isDown: false))
+        session.handle(.key(rightOption, isDown: false))
+
+        try await eventually { keyEvents(server).count == 4 }
+        #expect(keyEvents(server) == [
+            .keyEvent(down: true, keysym: 0xFFE9), .keyEvent(down: true, keysym: 0x31),
+            .keyEvent(down: false, keysym: 0x31), .keyEvent(down: false, keysym: 0xFFE9),
+        ])
+    }
+
+    // wayvnc #461: keys left down when the client goes away stay stuck on Hyprland.
+    @Test func disconnectingReleasesEveryHeldKeyFirst() async throws {
+        let server = try FakeRFBServer()
+        defer { server.stop() }
+        let session = try await connectedSession(to: server)
+        session.handle(.key(leftCmd, isDown: true))
+        session.handle(.key(one, isDown: true))
+        session.handle(.key(c, isDown: true))
+        session.handle(.key(c, isDown: false))
+
+        session.disconnect()
+
+        try await eventually {
+            if case .disconnected = session.state { true } else { false }
+        }
+        let events = keyEvents(server)
+        #expect(events.count == 6)
+        #expect(Set(events.suffix(2)) == [.keyEvent(down: false, keysym: 0xFFEB), .keyEvent(down: false, keysym: 0x31)])
+    }
+
     @Test func pointerMovementAndClicksReachTheRemote() async throws {
         let server = try FakeRFBServer(width: 64, height: 48)
         defer { server.stop() }
@@ -334,9 +444,23 @@ struct SessionTests {
     }
 }
 
+// USB HID usages of the keys the keyboard tests press.
+private let leftOption = KeyCode(hidUsage: 0xE2)
+private let leftCmd = KeyCode(hidUsage: 0xE3)
+private let rightOption = KeyCode(hidUsage: 0xE6)
+private let one = KeyCode(hidUsage: 0x1E)
+private let c = KeyCode(hidUsage: 0x06)
+
+/// Presses the keys in order, then releases them in reverse, as a chord.
 @MainActor
-private func connectedSession(to server: FakeRFBServer) async throws -> Session {
-    let session = Session(address: "127.0.0.1", port: server.port)
+private func press(_ keys: [KeyCode], _ session: Session) {
+    keys.forEach { session.handle(.key($0, isDown: true)) }
+    keys.reversed().forEach { session.handle(.key($0, isDown: false)) }
+}
+
+@MainActor
+private func connectedSession(to server: FakeRFBServer, keyboardProfile: KeyboardProfile = .default) async throws -> Session {
+    let session = Session(address: "127.0.0.1", port: server.port, keyboardProfile: keyboardProfile)
     session.connect()
     try await eventually { session.state == .connected }
     return session
@@ -359,8 +483,23 @@ private func loggedInSession(to server: FakeRFBServer, knownServerKeys: UserDefa
     return session
 }
 
+/// Waits until the Session has read the server's answer to its SetEncodings: the server answers before sending the
+/// screen update that follows, and the Session reads in order.
+@MainActor
+private func waitForAnnouncements(_ server: FakeRFBServer, _ session: Session) async throws {
+    try await eventually { server.messages.contains { if case .setEncodings = $0 { true } else { false } } }
+    // FramebufferUpdate, 1 rectangle at 0,0 sized 1x1, Raw encoding, one 32-bit pixel.
+    server.send([0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0] + [0, 0, 255, 0])
+    try await eventually { session.image != nil }
+}
+
 private func keyEvents(_ server: FakeRFBServer) -> [FakeRFBServer.ClientMessage] {
-    server.messages.filter { if case .keyEvent = $0 { true } else { false } }
+    server.messages.filter {
+        switch $0 {
+        case .keyEvent, .qemuKeyEvent: true
+        default: false
+        }
+    }
 }
 
 /// Polls `condition` until it holds, yielding the main actor so Session updates can land.

@@ -10,12 +10,24 @@ public struct Connection: Codable, Hashable, Identifiable, Sendable {
     public var port: UInt16
     /// Empty when the server asks for a password only.
     public var username: String
+    public var keyboardProfile: KeyboardProfile = .default
 
     public init(name: String, address: String, port: UInt16, username: String) {
         self.name = name
         self.address = address
         self.port = port
         self.username = username
+    }
+
+    // Connections saved before Keyboard Profiles existed have none; without this they would all fail to load.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        address = try container.decode(String.self, forKey: .address)
+        port = try container.decode(UInt16.self, forKey: .port)
+        username = try container.decode(String.self, forKey: .username)
+        keyboardProfile = try container.decodeIfPresent(KeyboardProfile.self, forKey: .keyboardProfile) ?? .default
     }
 }
 

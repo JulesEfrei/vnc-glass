@@ -30,10 +30,22 @@ final class FramebufferNSView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
+    /// AppKit drops the key-up of a key released while Cmd is down, which would leave it held on the remote.
+    private var keyUpMonitor: Any?
+
     override var acceptsFirstResponder: Bool { true }
 
     override func viewDidMoveToWindow() {
         window?.makeFirstResponder(self)
+        if let keyUpMonitor { NSEvent.removeMonitor(keyUpMonitor) }
+        keyUpMonitor = nil
+        guard window != nil else { return }
+        keyUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyUp) { [weak self] event in
+            guard let self, event.modifierFlags.contains(.command), event.window === window,
+                  window?.firstResponder === self else { return event }
+            forwardKey(event, isDown: false)
+            return nil
+        }
     }
 
     override func updateTrackingAreas() {
@@ -53,6 +65,13 @@ final class FramebufferNSView: NSView {
     override func keyDown(with event: NSEvent) { forwardKey(event, isDown: true) }
     override func keyUp(with event: NSEvent) { forwardKey(event, isDown: false) }
 
+    /// Modifier keys arrive here, not as key-down and key-up; the device-dependent flag bit tells which side is down.
+    override func flagsChanged(with event: NSEvent) {
+        guard let (usage, deviceFlag) = modifierKeys[Int(event.keyCode)] else { return }
+        let isDown = event.modifierFlags.rawValue & deviceFlag != 0
+        session.handle(.key(KeyCode(hidUsage: usage), isDown: isDown))
+    }
+
     private func pointerMoved(_ event: NSEvent) {
         guard let (x, y) = remotePoint(event) else { return }
         session.handle(.pointerMoved(x: x, y: y))
@@ -65,7 +84,7 @@ final class FramebufferNSView: NSView {
 
     private func forwardKey(_ event: NSEvent, isDown: Bool) {
         // The remote handles auto-repeat itself.
-        guard !event.isARepeat, let usage = hidUsages[Int(event.keyCode)] else { return }
+        guard !event.isARepeat, let usage = hidUsage(forKeyCode: Int(event.keyCode)) else { return }
         session.handle(.key(KeyCode(hidUsage: usage), isDown: isDown))
     }
 
@@ -81,7 +100,20 @@ final class FramebufferNSView: NSView {
     }
 }
 
-/// macOS virtual key codes to USB HID usages, for the keys the Session can send so far.
+/// The USB HID usage of a macOS virtual key code, as the key's position on a PC keyboard.
+private func hidUsage(forKeyCode keyCode: Int) -> UInt16? {
+    // Apple ISO keyboards swap the key left of 1 and the key beside left Shift relative to PC ones.
+    if KBGetLayoutType(Int16(LMGetKbdType())) == kKeyboardISO {
+        switch keyCode {
+        case kVK_ISO_Section: return 0x35
+        case kVK_ANSI_Grave: return 0x64
+        default: break
+        }
+    }
+    return hidUsages[keyCode]
+}
+
+/// macOS virtual key codes to USB HID usages, for the keys the Session can send.
 private let hidUsages: [Int: UInt16] = [
     kVK_ANSI_A: 0x04, kVK_ANSI_B: 0x05, kVK_ANSI_C: 0x06, kVK_ANSI_D: 0x07, kVK_ANSI_E: 0x08,
     kVK_ANSI_F: 0x09, kVK_ANSI_G: 0x0A, kVK_ANSI_H: 0x0B, kVK_ANSI_I: 0x0C, kVK_ANSI_J: 0x0D,
@@ -92,4 +124,19 @@ private let hidUsages: [Int: UInt16] = [
     kVK_ANSI_1: 0x1E, kVK_ANSI_2: 0x1F, kVK_ANSI_3: 0x20, kVK_ANSI_4: 0x21, kVK_ANSI_5: 0x22,
     kVK_ANSI_6: 0x23, kVK_ANSI_7: 0x24, kVK_ANSI_8: 0x25, kVK_ANSI_9: 0x26, kVK_ANSI_0: 0x27,
     kVK_Return: 0x28, kVK_Escape: 0x29, kVK_Delete: 0x2A, kVK_Tab: 0x2B, kVK_Space: 0x2C,
+    kVK_ANSI_Minus: 0x2D, kVK_ANSI_Equal: 0x2E, kVK_ANSI_LeftBracket: 0x2F, kVK_ANSI_RightBracket: 0x30,
+    kVK_ANSI_Backslash: 0x31, kVK_ANSI_Semicolon: 0x33, kVK_ANSI_Quote: 0x34, kVK_ANSI_Grave: 0x35,
+    kVK_ANSI_Comma: 0x36, kVK_ANSI_Period: 0x37, kVK_ANSI_Slash: 0x38, kVK_ISO_Section: 0x64,
+    kVK_F1: 0x3A, kVK_F2: 0x3B, kVK_F3: 0x3C, kVK_F4: 0x3D, kVK_F5: 0x3E, kVK_F6: 0x3F,
+    kVK_F7: 0x40, kVK_F8: 0x41, kVK_F9: 0x42, kVK_F10: 0x43, kVK_F11: 0x44, kVK_F12: 0x45,
+    kVK_Help: 0x49, kVK_Home: 0x4A, kVK_PageUp: 0x4B, kVK_ForwardDelete: 0x4C, kVK_End: 0x4D,
+    kVK_PageDown: 0x4E, kVK_RightArrow: 0x4F, kVK_LeftArrow: 0x50, kVK_DownArrow: 0x51, kVK_UpArrow: 0x52,
+]
+
+/// Modifier virtual key codes to their HID usage and device-dependent flag bit (IOKit's NX_DEVICE*KEYMASK).
+/// shortcut: Caps Lock is left out, since macOS reports it as a toggle; send it once Lock Mode needs it.
+private let modifierKeys: [Int: (UInt16, UInt)] = [
+    kVK_Control: (0xE0, 0x0001), kVK_Shift: (0xE1, 0x0002), kVK_Option: (0xE2, 0x0020), kVK_Command: (0xE3, 0x0008),
+    kVK_RightControl: (0xE4, 0x2000), kVK_RightShift: (0xE5, 0x0004), kVK_RightOption: (0xE6, 0x0040),
+    kVK_RightCommand: (0xE7, 0x0010),
 ]

@@ -11,18 +11,22 @@ import CoreGraphics
 // MARK: - Queue Management
 extension VNCConnection {
 	func enqueueKeyEvent(key: VNCKeyCode,
+						 scancode: UInt16? = nil,
 						 isDown: Bool) {
 		guard settings.inputMode != .none else { return }
 
 		let isARD = state.isAppleRemoteDesktop
 		let keyCode = key.rawValue(forAppleRemoteDesktop: isARD)
 
-		let keyEvent = VNCProtocol.KeyEvent(isDown: isDown,
-											key: keyCode)
-
-		logger.logDebug("Enqueuing Key \(keyEvent.description)")
-
-		enqueueClientToServerMessage(keyEvent)
+		if let scancode, state.isQEMUExtendedKeyEventSupported {
+			let keyEvent = VNCProtocol.QEMUExtendedKeyEvent(isDown: isDown, key: keyCode, scancode: scancode)
+			logger.logDebug("Enqueuing Key \(keyEvent.description)")
+			enqueueClientToServerMessage(keyEvent)
+		} else {
+			let keyEvent = VNCProtocol.KeyEvent(isDown: isDown, key: keyCode)
+			logger.logDebug("Enqueuing Key \(keyEvent.description)")
+			enqueueClientToServerMessage(keyEvent)
+		}
 	}
 
     func enqueueMouseEvent(nonNormalizedX: UInt16,

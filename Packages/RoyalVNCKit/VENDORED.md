@@ -21,3 +21,7 @@ Changes from upstream:
 - d3des keeps its key schedule in a global, so `VNCDESEncryption.d3desLock` serializes every DES use; two Sessions
   logging in at once could otherwise encrypt with each other's password (#3).
 - ARD: DH keys with a leading zero byte are padded to the key length instead of failing the login (about 1 in 128, #3).
+- QEMU Extended Key Event (#4): the client announces pseudo-encoding -258 and, once the server confirms it, sends
+  keys given with `keyDown(_:scancode:)`/`keyUp(_:scancode:)` as client message 255 with their XT scancode.
+  `disconnect()` while connected now lets the send queue drain first, so key releases queued just before it reach the
+  server (wayvnc #461).

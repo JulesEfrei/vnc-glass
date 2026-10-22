@@ -115,6 +115,7 @@ public final class VNCConnection: NSObjectOrAnyObject {
 			VNCPseudoEncodingType.desktopSize.rawValue: VNCProtocol.DesktopSizeEncoding(),
 			VNCPseudoEncodingType.desktopName.rawValue: VNCProtocol.DesktopNameEncoding(),
 			VNCPseudoEncodingType.cursor.rawValue: VNCProtocol.CursorEncoding(),
+			VNCPseudoEncodingType.qemuExtendedKeyEvent.rawValue: VNCProtocol.QEMUExtendedKeyEventEncoding(state: state),
 			compressionLevelEncodingType: compressionLevelEncoding,
 			jpegQualityLevelEncodingType: jpegQualityLevelEncoding
 		]
@@ -169,6 +170,7 @@ public final class VNCConnection: NSObjectOrAnyObject {
 			VNCPseudoEncodingType.desktopSize.rawValue,
 			VNCPseudoEncodingType.desktopName.rawValue,
 			VNCPseudoEncodingType.cursor.rawValue,
+			VNCPseudoEncodingType.qemuExtendedKeyEvent.rawValue,
 			// TODO: Implement
 //			VNCPseudoEncodingType.extendedClipboard.rawValue,
             

@@ -63,6 +63,7 @@ private extension VNCConnection {
 		guard !state.disconnectRequested,
               connection.isReady,
 			  let message = clientToServerMessageQueue.dequeue() else {
+			if state.disconnectWhenQueueIsEmpty { return beginDisconnecting() }
 			try await Task.sleep(seconds: 0.01)
 
 			return
