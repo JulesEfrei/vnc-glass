@@ -92,6 +92,17 @@ private struct ConnectionEditor: View {
                 case .macStyle: Text("⌘ sends Ctrl, so ⌘C copies on the remote. ⌃ sends Ctrl, ⌥ sends Alt.")
                 }
             }
+            Section {
+                Picker("Display Sizing", selection: $draft.displaySizing) {
+                    Text("Scale to Fit").tag(DisplaySizing.scaleToFit)
+                    Text("Match Window").tag(DisplaySizing.matchWindow)
+                }
+            } footer: {
+                switch draft.displaySizing {
+                case .scaleToFit: Text("The remote keeps its resolution and is scaled to fit the window.")
+                case .matchWindow: Text("The remote resizes to the window, pixel for pixel, including full screen.")
+                }
+            }
         }
         .formStyle(.grouped)
         .navigationTitle(draft.name)

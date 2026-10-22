@@ -317,6 +317,55 @@ struct SessionTests {
         #expect(keyEvents(server) == [.keyEvent(down: true, keysym: 0x31), .keyEvent(down: false, keysym: 0x31)])
     }
 
+    @Test func withMatchWindowAResizeAsksTheServerForTheWindowsPixelSize() async throws {
+        let server = try FakeRFBServer(advertisedEncodings: [FakeRFBServer.extendedDesktopSizeEncoding])
+        defer { server.stop() }
+        let session = Session(address: "127.0.0.1", port: server.port, displaySizing: .matchWindow)
+
+        // Before connecting: held until the server shows it can resize.
+        session.windowResized(width: 1280, height: 800)
+        session.connect()
+
+        try await eventually { desktopSizeRequests(server).count == 1 }
+        #expect(desktopSizeRequests(server) == [desktopSizeRequest(width: 1280, height: 800)])
+
+        session.windowResized(width: 2880, height: 1750)
+
+        try await eventually { desktopSizeRequests(server).count == 2 }
+        #expect(desktopSizeRequests(server).last == desktopSizeRequest(width: 2880, height: 1750))
+    }
+
+    @Test func withScaleToFitAResizeSendsNothing() async throws {
+        let server = try FakeRFBServer(advertisedEncodings: [FakeRFBServer.extendedDesktopSizeEncoding])
+        defer { server.stop() }
+        let session = Session(address: "127.0.0.1", port: server.port, displaySizing: .scaleToFit)
+        session.windowResized(width: 1280, height: 800)
+        session.connect()
+        try await eventually { session.state == .connected }
+        try await waitForAnnouncements(server, session)
+
+        session.windowResized(width: 2880, height: 1750)
+        // Sent after any resize request would have been, so its arrival means none is coming.
+        press([one], session)
+
+        try await eventually { keyEvents(server).count == 2 }
+        #expect(desktopSizeRequests(server).isEmpty)
+        #expect(session.screenSize == ScreenSize(width: 64, height: 48))
+    }
+
+    @Test func theRemoteScreenTakesTheSizeTheServerAnswersWith() async throws {
+        let server = try FakeRFBServer(width: 64, height: 48,
+                                       advertisedEncodings: [FakeRFBServer.extendedDesktopSizeEncoding])
+        defer { server.stop() }
+        let session = Session(address: "127.0.0.1", port: server.port, displaySizing: .matchWindow)
+        session.connect()
+        try await eventually { session.state == .connected }
+
+        session.windowResized(width: 1280, height: 800)
+
+        try await eventually { session.screenSize == ScreenSize(width: 1280, height: 800) }
+    }
+
     @Test func releasingOneOfTwoOptionKeysKeepsAltDown() async throws {
         let server = try FakeRFBServer()
         defer { server.stop() }
@@ -855,6 +904,16 @@ private func waitForAnnouncements(_ server: FakeRFBServer, _ session: Session) a
 
 /// FramebufferUpdate, 1 rectangle at 0,0 sized 1x1, Raw encoding, one 32-bit pixel.
 private let screenUpdate: [UInt8] = [0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0] + [0, 0, 255, 0]
+
+private func desktopSizeRequests(_ server: FakeRFBServer) -> [FakeRFBServer.ClientMessage] {
+    server.messages.filter { if case .setDesktopSize = $0 { true } else { false } }
+}
+
+/// SetDesktopSize for one screen at the origin, keeping the id the server gave it.
+private func desktopSizeRequest(width: UInt16, height: UInt16) -> FakeRFBServer.ClientMessage {
+    .setDesktopSize(width: width, height: height,
+                    screens: [.init(id: FakeRFBServer.screenID, x: 0, y: 0, width: width, height: height)])
+}
 
 private func keyEvents(_ server: FakeRFBServer) -> [FakeRFBServer.ClientMessage] {
     server.messages.filter {

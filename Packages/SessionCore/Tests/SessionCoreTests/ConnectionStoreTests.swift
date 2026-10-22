@@ -72,5 +72,17 @@ struct ConnectionStoreTests {
 
         #expect(connections.map(\.name) == ["Desk"])
         #expect(connections.first?.keyboardProfile == .default)
+        #expect(connections.first?.displaySizing == .scaleToFit)
+    }
+
+    @Test func theDisplaySizingIsSavedWithTheConnection() throws {
+        let store = ConnectionStore(defaults: defaults, keychain: keychain)
+        var desk = Connection(name: "Desk", address: "100.64.0.1", port: 5900, username: "")
+        #expect(desk.displaySizing == .scaleToFit)
+        desk.displaySizing = .matchWindow
+
+        try store.save(desk, password: "")
+
+        #expect(ConnectionStore(defaults: defaults, keychain: keychain).connections.first?.displaySizing == .matchWindow)
     }
 }

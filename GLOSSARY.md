@@ -5,7 +5,7 @@ A VNC viewer for macOS (later iPadOS) for controlling a remote computer, with ke
 ## Language
 
 **Connection**:
-A saved remote computer the user can connect to: its address, credentials and Keyboard Profile.
+A saved remote computer the user can connect to: its address, credentials, Keyboard Profile and Display Sizing.
 _Avoid_: Host, server, bookmark
 
 **Session**:

@@ -20,6 +20,8 @@ public final class FakeRFBServer: Sendable {
         case extendedClientCutText(flags: UInt32, text: [UInt8]?)
         /// QEMU Extended Key Event: the keysym and the XT keycode, with E0-prefixed keys as 0x80 | low byte.
         case qemuKeyEvent(down: Bool, keysym: UInt32, keycode: UInt32)
+        /// SetDesktopSize (251): the size the client asks for and its screen layout.
+        case setDesktopSize(width: UInt16, height: UInt16, screens: [Screen])
         /// A message type the server cannot parse yet. Its length is unknown, so the server drops the client.
         case unknown(type: UInt8)
     }
@@ -37,6 +39,32 @@ public final class FakeRFBServer: Sendable {
         /// Offers only this security type, one the client is expected not to support.
         case unsupported(UInt8)
     }
+
+    /// A screen in an ExtendedDesktopSize layout.
+    public struct Screen: Hashable, Sendable {
+        public let id: UInt32
+        public let x: UInt16
+        public let y: UInt16
+        public let width: UInt16
+        public let height: UInt16
+        public let flags: UInt32
+
+        public init(id: UInt32, x: UInt16, y: UInt16, width: UInt16, height: UInt16, flags: UInt32 = 0) {
+            self.id = id
+            self.x = x
+            self.y = y
+            self.width = width
+            self.height = height
+            self.flags = flags
+        }
+    }
+
+    /// Advertise this to offer ExtendedDesktopSize: the server then answers SetEncodings with its one screen, and
+    /// SetDesktopSize by taking the asked size and confirming it.
+    public static let extendedDesktopSizeEncoding: Int32 = -308
+
+    /// The id of the server's one screen in ExtendedDesktopSize layouts.
+    public static let screenID: UInt32 = 0x0BAD_CAFE
 
     /// Extended Clipboard flags: the text format and the actions.
     public enum ClipboardFlag {
@@ -61,6 +89,7 @@ public final class FakeRFBServer: Sendable {
 
     public let port: UInt16
     public let security: Security
+    /// The size given in ServerInit; SetDesktopSize changes the screen after that.
     public let width: UInt16
     public let height: UInt16
     /// Answers every login with a failed SecurityResult.
@@ -77,6 +106,8 @@ public final class FakeRFBServer: Sendable {
     private let serverKey: Mutex<SecKey?>
     /// The server's clipboard text, provided when the client asks for it.
     private let clipboardText = Mutex<String?>(nil)
+    /// The screen's current size, changed by SetDesktopSize.
+    private let size: Mutex<(width: UInt16, height: UInt16)>
 
     public init(width: UInt16 = 64, height: UInt16 = 48, security: Security = .none, rejectsLogin: Bool = false,
                 advertisedEncodings: [Int32] = []) throws {
@@ -85,6 +116,7 @@ public final class FakeRFBServer: Sendable {
         self.width = width
         self.height = height
         self.advertisedEncodings = advertisedEncodings
+        size = Mutex((width, height))
         if case .rsaAES = security {
             serverKey = Mutex(try newRSAKey())
         } else {
@@ -224,7 +256,10 @@ public final class FakeRFBServer: Sendable {
         switch message {
         case .setEncodings(let requested):
             let confirmed = advertisedEncodings.filter(requested.contains)
-            announce(confirmed.filter { $0 != Self.extendedClipboardEncoding })
+            announce(confirmed.filter { $0 != Self.extendedClipboardEncoding && $0 != Self.extendedDesktopSizeEncoding })
+            if confirmed.contains(Self.extendedDesktopSizeEncoding) {
+                sendExtendedDesktopSize(reason: 0)
+            }
             if confirmed.contains(Self.extendedClipboardEncoding) {
                 // Caps: text and every action, with no unsolicited text (size 0), as rfbproto recommends.
                 sendExtendedClipboard(flags: ClipboardFlag.caps | ClipboardFlag.request | ClipboardFlag.peek
@@ -237,9 +272,22 @@ public final class FakeRFBServer: Sendable {
             let bytes = Array(text.replacingOccurrences(of: "\n", with: "\r\n").utf8) + [0]
             sendExtendedClipboard(flags: ClipboardFlag.provide | ClipboardFlag.text,
                                   zlibCompress(be32(UInt32(bytes.count)) + bytes))
+        case .setDesktopSize(let width, let height, _):
+            size.withLock { $0 = (width, height) }
+            sendExtendedDesktopSize(reason: 1)
         default:
             break
         }
+    }
+
+    /// A FramebufferUpdate with one ExtendedDesktopSize rectangle: the current size and the one screen covering it.
+    /// Reason 0 is a change made on the server, 1 the answer to this client's request (always accepted).
+    private func sendExtendedDesktopSize(reason: UInt16) {
+        let (width, height) = size.withLock { $0 }
+        let rectangle = be16(reason) + be16(0) + be16(width) + be16(height)
+            + be32(UInt32(bitPattern: Self.extendedDesktopSizeEncoding))
+        let screen = be32(Self.screenID) + be16(0) + be16(0) + be16(width) + be16(height) + be32(0)
+        send([0, 0] + be16(1) + rectangle + [1, 0, 0, 0] + screen)
     }
 
     /// ServerCutText with a negative length: the flags, then the payload.
@@ -352,6 +400,13 @@ public final class FakeRFBServer: Sendable {
             guard let plain = zlibDecompress(Array(body[4...])), plain.count >= 4,
                   plain.count >= 4 + Int(u32(plain, 0)) else { return .unknown(type: type) }
             return .extendedClientCutText(flags: flags, text: Array(plain[4..<4 + Int(u32(plain, 0))]))
+        case 251:
+            guard let header = reader.read(7), let body = reader.read(Int(header[5]) * 16) else { return nil }
+            let screens = stride(from: 0, to: body.count, by: 16).map {
+                Screen(id: u32(body, $0), x: u16(body, $0 + 4), y: u16(body, $0 + 6), width: u16(body, $0 + 8),
+                       height: u16(body, $0 + 10), flags: u32(body, $0 + 12))
+            }
+            return .setDesktopSize(width: u16(header, 1), height: u16(header, 3), screens: screens)
         case 255:
             guard let body = reader.read(11), body[0] == 0 else { return .unknown(type: type) }
             return .qemuKeyEvent(down: u16(body, 1) != 0, keysym: u32(body, 3), keycode: u32(body, 7))

@@ -3,7 +3,7 @@ import Carbon.HIToolbox
 import SessionCore
 import SwiftUI
 
-/// Shows the remote screen scaled to fit and turns AppKit mouse and key events into Session input.
+/// Shows the remote screen scaled into the view, reports the view's size in pixels for Match Window, and turns AppKit mouse and key events into Session input.
 struct FramebufferView: NSViewRepresentable {
     let session: Session
 
@@ -57,6 +57,29 @@ final class FramebufferNSView: NSView {
             forwardKey(event, isDown: false)
             return nil
         }
+    }
+
+    // Reported once a live resize ends rather than on every step of it, so the remote resizes once.
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        if !inLiveResize { reportPixelSize() }
+    }
+
+    override func viewDidEndLiveResize() {
+        super.viewDidEndLiveResize()
+        reportPixelSize()
+    }
+
+    // Moving between Retina and non-Retina displays changes the pixel size without changing the frame.
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        reportPixelSize()
+    }
+
+    private func reportPixelSize() {
+        guard window != nil else { return }
+        let pixels = convertToBacking(bounds).size
+        session.windowResized(width: Int(pixels.width.rounded()), height: Int(pixels.height.rounded()))
     }
 
     // Checked on every focus, so a permission granted in System Settings works once the user comes back.

@@ -9,6 +9,8 @@ import Foundation
 extension VNCProtocol {
 	struct ExtendedDesktopSizeEncoding: VNCReceivablePseudoEncoding {
 		let encodingType = VNCPseudoEncodingType.extendedDesktopSize.rawValue
+		/// Called with the id of the server's first screen on every rectangle.
+		let didReceiveScreenID: (UInt32) -> Void
 	}
 }
 
@@ -56,6 +58,10 @@ extension VNCProtocol.ExtendedDesktopSizeEncoding {
 			let screen = try await VNCProtocol.Screen.receive(connection: connection)
 
 			screens.append(screen)
+		}
+
+		if let screen = screens.first {
+			didReceiveScreenID(screen.id)
 		}
 
 		framebuffer.resize(to: newSize,

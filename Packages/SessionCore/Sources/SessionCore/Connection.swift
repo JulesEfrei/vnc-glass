@@ -11,6 +11,7 @@ public struct Connection: Codable, Hashable, Identifiable, Sendable {
     /// Empty when the server asks for a password only.
     public var username: String
     public var keyboardProfile: KeyboardProfile = .default
+    public var displaySizing: DisplaySizing = .scaleToFit
 
     public init(name: String, address: String, port: UInt16, username: String) {
         self.name = name
@@ -19,7 +20,7 @@ public struct Connection: Codable, Hashable, Identifiable, Sendable {
         self.username = username
     }
 
-    // Connections saved before Keyboard Profiles existed have none; without this they would all fail to load.
+    // Connections saved before Keyboard Profiles or Display Sizing existed have none; without this they would all fail to load.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
@@ -28,7 +29,16 @@ public struct Connection: Codable, Hashable, Identifiable, Sendable {
         port = try container.decode(UInt16.self, forKey: .port)
         username = try container.decode(String.self, forKey: .username)
         keyboardProfile = try container.decodeIfPresent(KeyboardProfile.self, forKey: .keyboardProfile) ?? .default
+        displaySizing = try container.decodeIfPresent(DisplaySizing.self, forKey: .displaySizing) ?? .scaleToFit
     }
+}
+
+/// How a Session fits the remote screen to its window.
+public enum DisplaySizing: String, Codable, CaseIterable, Sendable {
+    /// The remote resolution never changes; its picture is scaled to fit the window.
+    case scaleToFit
+    /// The remote resizes to the window's size in pixels.
+    case matchWindow
 }
 
 /// The user's saved Connections, kept in UserDefaults, with their passwords in Keychain.

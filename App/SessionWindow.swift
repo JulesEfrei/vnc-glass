@@ -10,7 +10,8 @@ struct SessionWindow: View {
         self.connection = connection
         _session = State(initialValue: Session(address: connection.address, port: connection.port,
                                                username: connection.username, password: password,
-                                               keyboardProfile: connection.keyboardProfile))
+                                               keyboardProfile: connection.keyboardProfile,
+                                               displaySizing: connection.displaySizing))
     }
 
     var body: some View {

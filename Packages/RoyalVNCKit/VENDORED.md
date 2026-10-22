@@ -39,3 +39,7 @@ Changes from upstream:
   is gone with the parser that threw it.
 - The send queue locks: the API, the receive loop (clipboard replies) and the send loop all touch it from different
   threads, which upstream's plain array did not survive.
+- Display Sizing (#8): `setDesktopSize(width:height:)` sends SetDesktopSize (client message 251) for one screen at the
+  origin, keeping the id of the server's first screen. A request made before the server's first ExtendedDesktopSize
+  rectangle is held until it arrives, and never sent to servers without one. `ExtendedDesktopSizeEncoding` reports that
+  screen id to the connection.

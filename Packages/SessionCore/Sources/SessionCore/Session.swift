@@ -93,6 +93,9 @@ public final class Session {
     /// The username given to servers that ask for one, and prefilled in the prompt.
     public let username: String
     public let keyboardProfile: KeyboardProfile
+    public let displaySizing: DisplaySizing
+    /// The window's size in pixels, last given to `windowResized`.
+    @ObservationIgnored private var windowSize: ScreenSize?
     /// Answers the server's login without asking. Dropped once the server rejects it, so the user is asked instead.
     @ObservationIgnored private var savedPassword: String?
     @ObservationIgnored private var wasAskedForCredentials = false
@@ -109,11 +112,13 @@ public final class Session {
     @ObservationIgnored private var sentClipboardTexts: Set<String> = []
 
     public init(address: String, port: UInt16, username: String = "", password: String? = nil,
-                keyboardProfile: KeyboardProfile = .default, knownServerKeys: UserDefaults = .standard) {
+                keyboardProfile: KeyboardProfile = .default, displaySizing: DisplaySizing = .scaleToFit,
+                knownServerKeys: UserDefaults = .standard) {
         self.address = address
         self.port = port
         self.username = username
         self.keyboardProfile = keyboardProfile
+        self.displaySizing = displaySizing
         savedPassword = password
         self.knownServerKeys = knownServerKeys
     }
@@ -141,6 +146,20 @@ public final class Session {
         wasAskedForCredentials = false
         isUnauthenticatedOutsideTailscale = false
         link.connect()
+        requestWindowSize()
+    }
+
+    /// The window now shows this many pixels. With Match Window the remote is asked to take that size.
+    public func windowResized(width: Int, height: Int) {
+        windowSize = ScreenSize(width: width, height: height)
+        requestWindowSize()
+    }
+
+    private func requestWindowSize() {
+        // rfbproto rejects an empty screen, as a collapsed view would give.
+        guard displaySizing == .matchWindow, let link, let windowSize, windowSize.width > 0, windowSize.height > 0
+        else { return }
+        link.setDesktopSize(width: UInt16(clamping: windowSize.width), height: UInt16(clamping: windowSize.height))
     }
 
     public func disconnect() {

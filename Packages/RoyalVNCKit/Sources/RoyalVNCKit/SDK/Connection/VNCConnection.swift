@@ -68,6 +68,8 @@ public final class VNCConnection: NSObjectOrAnyObject {
 	let clipboardMonitor: VNCClipboardMonitor
 	/// Shared by the receive loop and `sendClipboardText`.
 	let clipboardState = Mutex(ClipboardState())
+	/// Shared by the receive loop and `setDesktopSize`.
+	let desktopSizeState = Mutex(DesktopSizeState())
 
 	let clientToServerMessageQueue = Queue<VNCSendableMessage>()
 
@@ -114,7 +116,9 @@ public final class VNCConnection: NSObjectOrAnyObject {
 			// Pseudo Encodings
 			VNCPseudoEncodingType.lastRect.rawValue: VNCProtocol.LastRectEncoding(),
 			VNCPseudoEncodingType.continuousUpdates.rawValue: VNCProtocol.ContinuousUpdatesEncoding(),
-			VNCPseudoEncodingType.extendedDesktopSize.rawValue: VNCProtocol.ExtendedDesktopSizeEncoding(),
+			VNCPseudoEncodingType.extendedDesktopSize.rawValue: VNCProtocol.ExtendedDesktopSizeEncoding(didReceiveScreenID: { [weak self] in
+				self?.receivedExtendedDesktopSize(screenID: $0)
+			}),
 			VNCPseudoEncodingType.desktopSize.rawValue: VNCProtocol.DesktopSizeEncoding(),
 			VNCPseudoEncodingType.desktopName.rawValue: VNCProtocol.DesktopNameEncoding(),
 			VNCPseudoEncodingType.cursor.rawValue: VNCProtocol.CursorEncoding(),
