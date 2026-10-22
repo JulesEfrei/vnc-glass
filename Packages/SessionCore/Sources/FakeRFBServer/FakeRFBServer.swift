@@ -109,8 +109,9 @@ public final class FakeRFBServer: Sendable {
     /// The screen's current size, changed by SetDesktopSize.
     private let size: Mutex<(width: UInt16, height: UInt16)>
 
-    public init(width: UInt16 = 64, height: UInt16 = 48, security: Security = .none, rejectsLogin: Bool = false,
-                advertisedEncodings: [Int32] = []) throws {
+    /// `port` 0 picks a free one; a stopped server's port starts a server the same client can come back to.
+    public init(port: UInt16 = 0, width: UInt16 = 64, height: UInt16 = 48, security: Security = .none,
+                rejectsLogin: Bool = false, advertisedEncodings: [Int32] = []) throws {
         self.security = security
         self.rejectsLogin = rejectsLogin
         self.width = width
@@ -125,10 +126,12 @@ public final class FakeRFBServer: Sendable {
 
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+        var reuseAddress: Int32 = 1 // The stopped server's connections linger in TIME_WAIT on its port.
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuseAddress, socklen_t(MemoryLayout<Int32>.size))
         var address = sockaddr_in()
         address.sin_family = sa_family_t(AF_INET)
         address.sin_addr.s_addr = inet_addr("127.0.0.1")
-        address.sin_port = 0
+        address.sin_port = port.bigEndian
         var length = socklen_t(MemoryLayout<sockaddr_in>.size)
         let bound = withUnsafeMutablePointer(to: &address) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -140,7 +143,7 @@ public final class FakeRFBServer: Sendable {
             throw POSIXError(.init(rawValue: errno) ?? .EIO)
         }
         listener = fd
-        port = UInt16(bigEndian: address.sin_port)
+        self.port = UInt16(bigEndian: address.sin_port)
 
         Thread.detachNewThread { [self] in acceptLoop() }
     }

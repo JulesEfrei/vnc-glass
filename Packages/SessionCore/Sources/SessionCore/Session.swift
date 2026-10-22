@@ -46,6 +46,8 @@ public final class Session {
     public enum State: Equatable, Sendable {
         case connecting
         case connected
+        /// The link dropped and the Session is retrying on its own, still showing the last frame.
+        case reconnecting
         /// Nil when the Session ended without a fault, as when the user disconnected or declined to log in.
         case disconnected(Failure?)
     }
@@ -101,7 +103,7 @@ public final class Session {
     /// Remembers each server's key fingerprint by address and port, trusting the first one seen.
     @ObservationIgnored private let knownServerKeys: UserDefaults
     /// The username given to servers that ask for one, and prefilled in the prompt.
-    public let username: String
+    public private(set) var username: String
     public let keyboardProfile: KeyboardProfile
     public let displaySizing: DisplaySizing
     /// The window's size in pixels, last given to `windowResized`.
@@ -122,10 +124,18 @@ public final class Session {
     @ObservationIgnored private var sentClipboardTexts: Set<String> = []
     /// Scrolling not yet sent, less than one wheel click on each axis.
     @ObservationIgnored private var scrollRemainder = (x: 0.0, y: 0.0)
+    /// How long to wait before each retry after the link drops; the Session gives up once they run out.
+    @ObservationIgnored private let reconnectDelays: [Duration]
+    /// Retries made since the connection dropped.
+    @ObservationIgnored private var reconnectAttempts = 0
+    @ObservationIgnored private var reconnectTask: Task<Void, Never>?
+
+    /// Backoff adding up to about 30 seconds, long enough for a Mac waking from sleep to get its network back.
+    public static let defaultReconnectDelays: [Duration] = [.seconds(1), .seconds(2), .seconds(4), .seconds(8), .seconds(15)]
 
     public init(address: String, port: UInt16, username: String = "", password: String? = nil,
                 keyboardProfile: KeyboardProfile = .default, displaySizing: DisplaySizing = .scaleToFit,
-                knownServerKeys: UserDefaults = .standard) {
+                knownServerKeys: UserDefaults = .standard, reconnectDelays: [Duration] = defaultReconnectDelays) {
         self.address = address
         self.port = port
         self.username = username
@@ -133,10 +143,18 @@ public final class Session {
         self.displaySizing = displaySizing
         savedPassword = password
         self.knownServerKeys = knownServerKeys
+        self.reconnectDelays = reconnectDelays
     }
 
     public func connect() {
         guard case .disconnected = state else { return }
+        reconnectAttempts = 0
+        state = .connecting
+        openLink()
+    }
+
+    /// Starts a new link to the server, leaving `state` to the caller.
+    private func openLink() {
         let settings = VNCConnection.Settings(
             isDebugLoggingEnabled: false,
             hostname: address,
@@ -154,7 +172,6 @@ public final class Session {
         link.delegate = linkDelegate
         self.link = link
         self.linkDelegate = linkDelegate
-        state = .connecting
         wasAskedForCredentials = false
         isUnauthenticatedOutsideTailscale = false
         link.connect()
@@ -175,11 +192,18 @@ public final class Session {
     }
 
     public func disconnect() {
+        reconnectTask?.cancel()
+        reconnectAttempts = reconnectDelays.count // A link failing while it closes is no drop to retry.
         cancelCredentials()
         rejectServerKey()
         lockMode = .unlocked
         releaseHeldKeys()
         link?.disconnect()
+        if state == .reconnecting {
+            // No live link is left to report the ending, and a retry link's late reports no longer count.
+            linkDelegate?.session = nil
+            state = .disconnected(nil)
+        }
     }
 
     /// Turns Lock Mode on, as when the window goes full screen.
@@ -230,6 +254,9 @@ public final class Session {
 
     public func submitCredentials(username: String, password: String) {
         guard let credentialRequest else { return }
+        // Remembered so retries after a drop log in without asking again.
+        self.username = username
+        savedPassword = password
         answerCredentialRequest(credentialRequest.needsUsername
             ? VNCUsernamePasswordCredential(username: username, password: password)
             : VNCPasswordCredential(password: password))
@@ -366,8 +393,9 @@ public final class Session {
 
     fileprivate func linkStatusChanged(_ status: VNCConnection.Status, failure: Failure?) {
         switch status {
-        case .connecting: state = .connecting
+        case .connecting: if state != .reconnecting { state = .connecting }
         case .connected:
+            reconnectAttempts = 0
             // Every login RoyalVNCKit performs asks for credentials, so connecting without being asked means None.
             isUnauthenticatedOutsideTailscale = !wasAskedForCredentials && !Self.isTailscaleAddress(address)
             state = .connected
@@ -385,7 +413,20 @@ public final class Session {
             cursor = nil
             scrollRemainder = (0, 0)
             if failure == .authenticationFailed { savedPassword = nil }
-            state = .disconnected(failure)
+            // Retry a drop or a failed retry, but not a login the server turned down or an ending the user chose.
+            if state == .connected || state == .reconnecting, let failure, failure != .authenticationFailed,
+               failure != .unsupportedSecurityType, reconnectAttempts < reconnectDelays.count {
+                let delay = reconnectDelays[reconnectAttempts]
+                reconnectAttempts += 1
+                state = .reconnecting
+                reconnectTask = Task { [weak self] in
+                    try? await Task.sleep(for: delay)
+                    guard !Task.isCancelled else { return }
+                    self?.openLink()
+                }
+            } else {
+                state = .disconnected(failure)
+            }
         case .disconnecting: break
         }
     }
@@ -436,7 +477,8 @@ public final class Session {
     }
 }
 
-/// Receives RoyalVNCKit callbacks on its own queue and hands them to the Session on the main actor.
+/// Receives RoyalVNCKit callbacks on its own queue and hands them to the Session on the main actor. `session` is read
+/// there, so clearing it also drops the callbacks already on their way.
 private final class LinkDelegate: NSObject, VNCConnectionDelegate, Sendable {
     nonisolated(unsafe) weak var session: Session?
     private let isScheduled = Mutex(false)
@@ -448,7 +490,7 @@ private final class LinkDelegate: NSObject, VNCConnectionDelegate, Sendable {
     func connection(_ connection: VNCConnection, stateDidChange connectionState: VNCConnection.ConnectionState) {
         let status = connectionState.status
         let failure = connectionState.error.flatMap(Session.Failure.init)
-        Task { @MainActor [weak session] in session?.linkStatusChanged(status, failure: failure) }
+        Task { @MainActor [self] in session?.linkStatusChanged(status, failure: failure) }
     }
 
     func connection(_ connection: VNCConnection,
@@ -456,7 +498,7 @@ private final class LinkDelegate: NSObject, VNCConnectionDelegate, Sendable {
                     completion: @escaping (VNCCredential?) -> Void) {
         let request = CredentialRequest(needsUsername: authenticationType.requiresUsername)
         let reply = CredentialReply(send: completion)
-        Task { @MainActor [weak session] in
+        Task { @MainActor [self] in
             guard let session else { return reply.send(nil) }
             session.credentialsRequested(request, reply: reply)
         }
@@ -466,7 +508,7 @@ private final class LinkDelegate: NSObject, VNCConnectionDelegate, Sendable {
                     shouldTrustServerKey fingerprint: Data,
                     completion: @escaping (Bool) -> Void) {
         let reply = ServerKeyReply(fingerprint: fingerprint, send: completion)
-        Task { @MainActor [weak session] in
+        Task { @MainActor [self] in
             guard let session else { return reply.send(false) }
             session.serverKeyPresented(reply)
         }
@@ -488,11 +530,11 @@ private final class LinkDelegate: NSObject, VNCConnectionDelegate, Sendable {
 
     func connection(_ connection: VNCConnection, didUpdateCursor cursor: VNCCursor) {
         let cursor = RemoteCursor(image: cursor.cgImage, hotspot: cursor.cgHotspot)
-        Task { @MainActor [weak session] in session?.cursorChanged(cursor) }
+        Task { @MainActor [self] in session?.cursorChanged(cursor) }
     }
 
     func connection(_ connection: VNCConnection, didReceiveClipboardText text: String) {
-        Task { @MainActor [weak session] in session?.remoteClipboardChanged(text) }
+        Task { @MainActor [self] in session?.remoteClipboardChanged(text) }
     }
 
     /// Schedules one render for a burst of changes. The flag is cleared before rendering,

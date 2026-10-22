@@ -20,6 +20,10 @@ _Avoid_: Capture mode, focus mode, grab
 The state of a locked Session whose window is not focused: keystrokes act on the Mac until the window is focused again, when Lock Mode resumes by itself.
 _Avoid_: Suspended, unlocked
 
+**Reconnecting**:
+The state of a Session whose link dropped without the user asking, while it retries on its own for about 30 seconds over the last frame. Lock Mode is off and stays off once it is back.
+_Avoid_: Retrying, offline
+
 **Unlock Shortcut**:
 The one key combination that is never forwarded to the remote computer; it toggles Lock Mode on and off.
 _Avoid_: Escape shortcut, super shortcut, hotkey

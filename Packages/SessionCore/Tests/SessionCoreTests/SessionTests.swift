@@ -911,16 +911,77 @@ struct SessionTests {
         try await eventually { session.state == .disconnected(.unsupportedSecurityType) }
     }
 
-    @Test func serverDroppingTheConnectionDisconnectsTheSession() async throws {
+    @Test func aDroppedConnectionReconnectsOnceTheServerAcceptsAgain() async throws {
         let server = try FakeRFBServer()
-        defer { server.stop() }
-        let session = try await connectedSession(to: server)
+        let session = try await connectedSession(to: server, reconnectDelays: quickRetries)
+        try await waitForAnnouncements(server, session)
 
-        server.dropConnection()
+        server.stop()
 
-        try await eventually {
-            if case .disconnected = session.state { true } else { false }
-        }
+        try await eventually { session.state == .reconnecting }
+        #expect(session.image != nil, "the last frame stays on screen while reconnecting")
+        let restarted = try FakeRFBServer(port: server.port)
+        defer { restarted.stop() }
+        try await eventually { session.state == .connected }
+    }
+
+    @Test func retriesStopWhenTheServerStaysDown() async throws {
+        let server = try FakeRFBServer()
+        let session = try await connectedSession(to: server, reconnectDelays: quickRetries)
+
+        server.stop()
+
+        try await eventually { session.state == .reconnecting }
+        // Disconnected is the state from which `connect` reconnects by hand.
+        try await eventually { session.state == .disconnected(.refused) }
+    }
+
+    @Test func aTypedPasswordLogsInAgainWithoutAskingAfterADrop() async throws {
+        let server = try FakeRFBServer(security: .vncPassword)
+        let session = Session(address: "127.0.0.1", port: server.port, reconnectDelays: quickRetries)
+        session.connect()
+        try await eventually { session.credentialRequest != nil }
+        session.submitCredentials(username: "", password: "password")
+        try await eventually { session.state == .connected }
+
+        server.stop()
+
+        try await eventually { session.state == .reconnecting }
+        let restarted = try FakeRFBServer(port: server.port, security: .vncPassword)
+        defer { restarted.stop() }
+        try await eventually { session.state == .connected }
+        let block: [UInt8] = [0xFF, 0x97, 0x50, 0x2E, 0x94, 0x22, 0xF0, 0x89]
+        #expect(restarted.authenticationResponse == block + block)
+    }
+
+    @Test func droppingWhileLockedUnlocksAndStaysUnlockedAfterReconnecting() async throws {
+        let server = try FakeRFBServer()
+        let session = try await connectedSession(to: server, reconnectDelays: quickRetries)
+        session.lock()
+
+        server.stop()
+
+        try await eventually { session.state == .reconnecting }
+        #expect(session.lockMode == .unlocked)
+        let restarted = try FakeRFBServer(port: server.port)
+        defer { restarted.stop() }
+        try await eventually { session.state == .connected }
+        #expect(session.lockMode == .unlocked)
+    }
+
+    @Test func disconnectingWhileReconnectingStopsRetrying() async throws {
+        let server = try FakeRFBServer()
+        let session = try await connectedSession(to: server, reconnectDelays: [.milliseconds(200)])
+        server.stop()
+        try await eventually { session.state == .reconnecting }
+
+        session.disconnect()
+
+        #expect(session.state == .disconnected(nil))
+        let restarted = try FakeRFBServer(port: server.port)
+        defer { restarted.stop() }
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(session.state == .disconnected(nil))
     }
 }
 
@@ -941,12 +1002,17 @@ private func press(_ keys: [KeyCode], _ session: Session) {
 }
 
 @MainActor
-private func connectedSession(to server: FakeRFBServer, keyboardProfile: KeyboardProfile = .default) async throws -> Session {
-    let session = Session(address: "127.0.0.1", port: server.port, keyboardProfile: keyboardProfile)
+private func connectedSession(to server: FakeRFBServer, keyboardProfile: KeyboardProfile = .default,
+                              reconnectDelays: [Duration] = []) async throws -> Session {
+    let session = Session(address: "127.0.0.1", port: server.port, keyboardProfile: keyboardProfile,
+                          reconnectDelays: reconnectDelays)
     session.connect()
     try await eventually { session.state == .connected }
     return session
 }
+
+/// Retry schedule short enough for tests, still several attempts long.
+private let quickRetries: [Duration] = Array(repeating: .milliseconds(50), count: 5)
 
 /// An empty settings domain, so no test sees server keys remembered by another.
 private func freshDefaults() -> UserDefaults {

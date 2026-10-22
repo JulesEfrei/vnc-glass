@@ -19,10 +19,15 @@ struct SessionWindow: View {
             .background(.black)
             .overlay {
                 if let status {
-                    Text(status)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 12)
-                        .glassEffect()
+                    VStack(spacing: 12) {
+                        Text(status)
+                        if case .disconnected = session.state {
+                            Button("Reconnect", systemImage: "arrow.clockwise", action: session.connect)
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+                    .glassEffect(in: .rect(cornerRadius: 16))
                 }
             }
             .overlay(alignment: .top) {
@@ -36,9 +41,9 @@ struct SessionWindow: View {
             .toolbar {
                 if session.state == .connected {
                     LockModeButton(session: session)
+                }
+                if session.state == .connected || session.state == .reconnecting {
                     Button("Disconnect", systemImage: "xmark", action: session.disconnect)
-                } else if case .disconnected = session.state {
-                    Button("Connect", systemImage: "arrow.clockwise", action: session.connect)
                 }
             }
             .sheet(isPresented: Binding(
@@ -92,6 +97,7 @@ struct SessionWindow: View {
         switch session.state {
         case .connecting: "Connecting…"
         case .connected: nil
+        case .reconnecting: "Reconnecting…"
         case .disconnected(nil): "Disconnected"
         case .disconnected(.unreachable?):
             "\(connection.address) could not be reached. Check the address and that the computer is online."

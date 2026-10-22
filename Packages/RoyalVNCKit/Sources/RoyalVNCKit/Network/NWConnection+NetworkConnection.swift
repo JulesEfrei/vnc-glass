@@ -12,6 +12,11 @@ extension NWConnection: NetworkConnection {
     convenience init(settings: NetworkConnectionSettings) {
         let tcpOptions = NWProtocolTCP.Options()
         tcpOptions.connectionTimeout = settings.connectionTimeout
+        // Probe an idle link so one that died while the Mac slept fails within seconds of waking.
+        tcpOptions.enableKeepalive = true
+        tcpOptions.keepaliveIdle = 5
+        tcpOptions.keepaliveInterval = 2
+        tcpOptions.keepaliveCount = 3
 
         let connectionParameters = NWParameters(tls: nil,
                                                 tcp: tcpOptions)
