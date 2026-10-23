@@ -102,6 +102,8 @@ public final class FakeRFBServer: Sendable {
     public let advertisedEncodings: [Int32]
 
     private let listener: Int32
+    private let isStopped = Mutex(false)
+    private let acceptLoopEnded = DispatchSemaphore(value: 0)
     private let client = Mutex<Client?>(nil)
     private let recorded = Mutex<[ClientMessage]>([])
     private let response = Mutex<[UInt8]?>(nil)
@@ -190,19 +192,48 @@ public final class FakeRFBServer: Sendable {
         }
     }
 
+    /// Returns once the port is free again, so a server can restart on it.
     public func stop() {
+        guard !isStopped.withLock({ stopped in defer { stopped = true }; return stopped }) else { return }
         dropConnection()
-        shutdown(listener, SHUT_RDWR)
-        close(listener)
+        // A blocked `accept` ignores `shutdown` on Darwin, so a connection of our own wakes it. Non-blocking,
+        // so a full backlog cannot stall it; the loop exits on whichever connection it accepts first.
+        let waker = socket(AF_INET, SOCK_STREAM, 0)
+        _ = fcntl(waker, F_SETFL, O_NONBLOCK)
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        address.sin_port = port.bigEndian
+        _ = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(waker, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        acceptLoopEnded.wait()
+        close(waker)
     }
 
     private func acceptLoop() {
+        // Only this thread closes the listener: closed elsewhere, its number could be reused by another
+        // test's socket before the next `accept`, and this server would take that test's client.
+        defer {
+            close(listener)
+            acceptLoopEnded.signal()
+        }
         while true {
             let fd = accept(listener, nil, nil)
             guard fd >= 0 else { return }
             var noSigPipe: Int32 = 1
             setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
-            client.withLock { $0 = Client(fd: fd) }
+            // Under the stop lock, so `stop` either finds this client to drop or this loop sees it stopped.
+            let isServing = isStopped.withLock { stopped in
+                if !stopped { client.withLock { $0 = Client(fd: fd) } }
+                return !stopped
+            }
+            guard isServing else {
+                close(fd)
+                return
+            }
             var reader = Reader(fd: fd)
             serve(&reader)
             client.withLock {
